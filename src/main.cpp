@@ -15,6 +15,7 @@ constexpr char kCanFilterCharacteristicUuid[] = "00000002-0000-1000-8000-00805f9
 
 constexpr uint32_t kBrakePressurePid = 0x00000101;
 constexpr uint32_t kThrottlePositionPid = 0x00000102;
+constexpr uint32_t kBatteryVoltagePid = 0x00000103;
 constexpr uint16_t kDefaultNotifyIntervalMs = 20;
 constexpr uint16_t kBleTxLogIntervalMs = 5000;
 constexpr uint16_t kMaxBrakePressureBar = 250;
@@ -46,8 +47,10 @@ constexpr uint16_t kAdcMissingLogIntervalMs = 5000;
 constexpr float kAds1115VoltsPerBit = 6.144F / 32768.0F;
 constexpr uint8_t kThrottleAdcChannel = 0;
 constexpr uint8_t kBrakePressureAdcChannel = 1;
+constexpr uint8_t kBatteryAdcChannel = 2;
 constexpr uint16_t kThrottleAdcReadIntervalMs = 20;
 constexpr uint16_t kBrakePressureAdcReadIntervalMs = 20;
+constexpr uint16_t kBatteryAdcReadIntervalMs = 1000;
 constexpr uint16_t kThrottleZeroCalibrationMs = 1000;
 constexpr uint16_t kThrottleOpenCalibrationPauseMs = 2000;
 constexpr uint16_t kThrottleOpenCalibrationMs = 2000;
@@ -61,6 +64,7 @@ constexpr float kThrottleAdcFilterAlpha = 0.3F;
 constexpr float kThrottlePercentDeadband = 0.2F;
 constexpr float kBrakePressureZeroVolts = 0.5F;
 constexpr float kBrakePressureFullVolts = 4.5F;
+constexpr float kBatteryDividerMultiplier = 2.013564F;
 constexpr char kThrottleCalibrationPrefsNamespace[] = "throttle";
 constexpr char kThrottleZeroPrefsKey[] = "zero_v";
 constexpr char kThrottleFullPrefsKey[] = "full_v";
@@ -74,6 +78,7 @@ bool bleWasConnected = false;
 bool allowAllPids = true;
 bool brakePressurePidAllowed = true;
 bool throttlePositionPidAllowed = true;
+bool batteryVoltagePidAllowed = true;
 uint16_t notifyIntervalMs = kDefaultNotifyIntervalMs;
 uint32_t lastCanNotifyMs = 0;
 uint32_t lastBleTxLogMs = 0;
@@ -84,6 +89,7 @@ uint32_t lastAdcReadMs = 0;
 uint32_t lastAdcMissingLogMs = 0;
 uint32_t lastThrottleAdcReadMs = 0;
 uint32_t lastBrakePressureAdcReadMs = 0;
+uint32_t lastBatteryAdcReadMs = 0;
 uint8_t adcI2cAddress = 0;
 int16_t throttleAdcRaw = 0;
 float throttleAdcVolts = 0.0F;
@@ -98,6 +104,10 @@ int16_t brakePressureAdcRaw = 0;
 float brakePressureAdcVolts = 0.0F;
 float brakePressureBar = 0.0F;
 bool brakePressureAdcValid = false;
+int16_t batteryAdcRaw = 0;
+float batteryAdcVolts = 0.0F;
+float batteryVolts = 0.0F;
+bool batteryAdcValid = false;
 bool ledOn = false;
 bool ledIdleBlinkOn = false;
 bool ledIdleConnected = false;
@@ -255,6 +265,10 @@ float adcVoltsToBrakePressureBar(float volts) {
                    static_cast<float>(kMaxBrakePressureBar));
 }
 
+float adcVoltsToBatteryVolts(float volts) {
+  return max(0.0F, volts * kBatteryDividerMultiplier);
+}
+
 void invalidateThrottleAdc() {
   throttleAdcValid = false;
   throttleFilterInitialized = false;
@@ -268,9 +282,17 @@ void invalidateBrakePressureAdc() {
   brakePressureBar = 0.0F;
 }
 
+void invalidateBatteryAdc() {
+  batteryAdcValid = false;
+  batteryAdcRaw = 0;
+  batteryAdcVolts = 0.0F;
+  batteryVolts = 0.0F;
+}
+
 void invalidateAdcMeasurements() {
   invalidateThrottleAdc();
   invalidateBrakePressureAdc();
+  invalidateBatteryAdc();
 }
 
 float updateThrottleFilteredVolts(float volts, bool resetFilter) {
@@ -304,6 +326,13 @@ void updateBrakePressureAdcState(int16_t rawValue, float volts) {
   brakePressureAdcVolts = volts;
   brakePressureBar = adcVoltsToBrakePressureBar(volts);
   brakePressureAdcValid = true;
+}
+
+void updateBatteryAdcState(int16_t rawValue, float volts) {
+  batteryAdcRaw = rawValue;
+  batteryAdcVolts = volts;
+  batteryVolts = adcVoltsToBatteryVolts(volts);
+  batteryAdcValid = true;
 }
 
 void updateThrottleFromAdc(uint32_t now) {
@@ -348,6 +377,28 @@ void updateBrakePressureFromAdc(uint32_t now) {
   }
 
   updateBrakePressureAdcState(rawValue, volts);
+}
+
+void updateBatteryFromAdc(uint32_t now) {
+  if (adcI2cAddress == 0 ||
+      now - lastBatteryAdcReadMs < kBatteryAdcReadIntervalMs) {
+    return;
+  }
+
+  lastBatteryAdcReadMs = now;
+
+  int16_t rawValue = 0;
+  float volts = 0.0F;
+  if (!readAds1115SingleEnded(kBatteryAdcChannel, rawValue, volts)) {
+    Serial.printf("ADS1115 battery A%u read failed at 0x%02X, will retry scan\n",
+                  kBatteryAdcChannel,
+                  adcI2cAddress);
+    adcI2cAddress = 0;
+    invalidateAdcMeasurements();
+    return;
+  }
+
+  updateBatteryAdcState(rawValue, volts);
 }
 
 void setLedDuty(uint16_t duty) {
@@ -762,9 +813,11 @@ void printAdcReadings(uint32_t now) {
                          false);
   updateBrakePressureAdcState(rawValues[kBrakePressureAdcChannel],
                               volts[kBrakePressureAdcChannel]);
+  updateBatteryAdcState(rawValues[kBatteryAdcChannel],
+                        volts[kBatteryAdcChannel]);
 
   Serial.printf(
-      "ADC ADS1115 A0=%d %.3fV filtered=%.3fV throttle=%.1f%%, A1=%d %.3fV brake=%.1f bar, A2=%d %.3fV, A3=%d %.3fV\n",
+      "ADC ADS1115 A0=%d %.3fV filtered=%.3fV throttle=%.1f%%, A1=%d %.3fV brake=%.1f bar, A2=%d %.3fV battery=%.3fV, A3=%d %.3fV\n",
       rawValues[0],
       volts[0],
       throttleFilteredVolts,
@@ -774,6 +827,7 @@ void printAdcReadings(uint32_t now) {
       brakePressureBar,
       rawValues[2],
       volts[2],
+      batteryVolts,
       rawValues[3],
       volts[3]);
 }
@@ -783,10 +837,16 @@ uint16_t pressureBarToCentibar(float pressureBar) {
   return static_cast<uint16_t>(lroundf(pressureBar * 100.0F));
 }
 
+uint16_t voltsToMillivolts(float volts) {
+  volts = constrain(volts, 0.0F, 65.535F);
+  return static_cast<uint16_t>(lroundf(volts * 1000.0F));
+}
+
 bool shouldSendPid(uint32_t pid) {
   return allowAllPids ||
          (pid == kBrakePressurePid && brakePressurePidAllowed) ||
-         (pid == kThrottlePositionPid && throttlePositionPidAllowed);
+         (pid == kThrottlePositionPid && throttlePositionPidAllowed) ||
+         (pid == kBatteryVoltagePid && batteryVoltagePidAllowed);
 }
 
 bool publishCanValue(uint32_t pid, uint16_t rawValue) {
@@ -804,19 +864,23 @@ bool publishCanValue(uint32_t pid, uint16_t rawValue) {
   return true;
 }
 
-void publishTelemetry(float pressureBar, float throttlePercent) {
+void publishTelemetry(float pressureBar,
+                      float throttlePercent,
+                      float batteryVolts) {
   const uint16_t pressureCentibar = pressureBarToCentibar(pressureBar);
   const uint16_t throttleCentipercent =
       static_cast<uint16_t>(lroundf(constrain(throttlePercent, 0.0F, 100.0F) * 100.0F));
+  const uint16_t batteryMillivolts = voltsToMillivolts(batteryVolts);
 
   const bool brakeSent = publishCanValue(kBrakePressurePid, pressureCentibar);
   const bool throttleSent = publishCanValue(kThrottlePositionPid, throttleCentipercent);
+  const bool batterySent = publishCanValue(kBatteryVoltagePid, batteryMillivolts);
 
   const uint32_t now = millis();
   if (now - lastBleTxLogMs >= kBleTxLogIntervalMs) {
     lastBleTxLogMs = now;
     Serial.printf(
-        "BLE TX brake=%s PID=0x%08lX pressure=%.2f bar (%u), throttle=%s PID=0x%08lX throttle=%.2f %% (%u)\n",
+        "BLE TX brake=%s PID=0x%08lX pressure=%.2f bar (%u), throttle=%s PID=0x%08lX throttle=%.2f %% (%u), battery=%s PID=0x%08lX voltage=%.3f V (%u mV)\n",
         brakeSent ? "sent" : "filtered",
         static_cast<unsigned long>(kBrakePressurePid),
         pressureBar,
@@ -824,7 +888,11 @@ void publishTelemetry(float pressureBar, float throttlePercent) {
         throttleSent ? "sent" : "filtered",
         static_cast<unsigned long>(kThrottlePositionPid),
         throttlePercent,
-        throttleCentipercent);
+        throttleCentipercent,
+        batterySent ? "sent" : "filtered",
+        static_cast<unsigned long>(kBatteryVoltagePid),
+        batteryVolts,
+        batteryMillivolts);
   }
 }
 
@@ -853,6 +921,7 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
       allowAllPids = false;
       brakePressurePidAllowed = false;
       throttlePositionPidAllowed = false;
+      batteryVoltagePidAllowed = false;
       Serial.println("RaceChrono filter: deny all PIDs");
       return;
     }
@@ -861,6 +930,7 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
       allowAllPids = true;
       brakePressurePidAllowed = true;
       throttlePositionPidAllowed = true;
+      batteryVoltagePidAllowed = true;
       notifyIntervalMs = max<uint16_t>(1, readUint16Be(data + 1));
       Serial.printf("RaceChrono filter: allow all PIDs, interval=%u ms\n", notifyIntervalMs);
       return;
@@ -869,11 +939,15 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
     if (commandId == 2 && length >= 7) {
       const uint16_t interval = max<uint16_t>(1, readUint16Be(data + 1));
       const uint32_t pid = readUint32Be(data + 3);
-      const bool knownPid = pid == kBrakePressurePid || pid == kThrottlePositionPid;
+      const bool knownPid = pid == kBrakePressurePid ||
+                            pid == kThrottlePositionPid ||
+                            pid == kBatteryVoltagePid;
       if (pid == kBrakePressurePid) {
         brakePressurePidAllowed = true;
       } else if (pid == kThrottlePositionPid) {
         throttlePositionPidAllowed = true;
+      } else if (pid == kBatteryVoltagePid) {
+        batteryVoltagePidAllowed = true;
       }
       if (knownPid) {
         notifyIntervalMs = interval;
@@ -933,6 +1007,8 @@ void setup() {
                 static_cast<unsigned long>(kBrakePressurePid));
   Serial.printf("RaceChrono BLE CAN PID 0x%08lX: throttle position, centipercent\n",
                 static_cast<unsigned long>(kThrottlePositionPid));
+  Serial.printf("RaceChrono BLE CAN PID 0x%08lX: battery voltage, millivolts\n",
+                static_cast<unsigned long>(kBatteryVoltagePid));
 
   loadThrottleCalibration();
   startAdc();
@@ -946,11 +1022,12 @@ void loop() {
 
   updateThrottleFromAdc(now);
   updateBrakePressureFromAdc(now);
+  updateBatteryFromAdc(now);
   updateLedIdleBlink(now);
 
   if (bleClientConnected && now - lastCanNotifyMs >= notifyIntervalMs) {
     lastCanNotifyMs = now;
-    publishTelemetry(brakePressureBar, throttlePercent);
+    publishTelemetry(brakePressureBar, throttlePercent, batteryVolts);
   }
 
   printAdcReadings(now);
@@ -971,7 +1048,7 @@ void loop() {
     lastStatusLogMs = now;
 
     Serial.printf(
-        "uptime=%lu ms, free_heap=%u bytes, cpu=%u MHz, ble=%s, brake=%.1f bar (A1=%s %.3fV raw=%d), throttle=%.1f %% (A0=%s %.3fV raw=%d)\n",
+        "uptime=%lu ms, free_heap=%u bytes, cpu=%u MHz, ble=%s, brake=%.1f bar (A1=%s %.3fV raw=%d), throttle=%.1f %% (A0=%s %.3fV raw=%d), battery=%.3f V (A2=%s %.3fV raw=%d)\n",
         static_cast<unsigned long>(now),
         ESP.getFreeHeap(),
         ESP.getCpuFreqMHz(),
@@ -983,6 +1060,10 @@ void loop() {
         throttlePercent,
         throttleAdcValid ? "ok" : "missing",
         throttleAdcVolts,
-        throttleAdcRaw);
+        throttleAdcRaw,
+        batteryVolts,
+        batteryAdcValid ? "ok" : "missing",
+        batteryAdcVolts,
+        batteryAdcRaw);
   }
 }
