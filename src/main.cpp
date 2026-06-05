@@ -17,8 +17,7 @@ constexpr uint32_t kBrakePressurePid = 0x00000101;
 constexpr uint32_t kThrottlePositionPid = 0x00000102;
 constexpr uint16_t kDefaultNotifyIntervalMs = 20;
 constexpr uint16_t kBleTxLogIntervalMs = 5000;
-constexpr uint16_t kMaxBrakePressureBar = 120;
-constexpr uint32_t kBrakeRampMs = 10000;
+constexpr uint16_t kMaxBrakePressureBar = 250;
 constexpr uint16_t kStatusLogIntervalMs = 10000;
 constexpr uint8_t kLedPin = 5;
 constexpr uint8_t kLedPwmChannel = 0;
@@ -27,6 +26,10 @@ constexpr uint8_t kLedPwmResolutionBits = 8;
 constexpr uint16_t kLedPwmMaxDuty = (1U << kLedPwmResolutionBits) - 1;
 constexpr uint16_t kLedThrottleMaxDuty = 180;
 constexpr float kLedThrottleGamma = 1.7F;
+constexpr float kLedBrakePressureThresholdBar = 15.0F;
+constexpr float kLedBrakePressureFullBar = 100.0F;
+constexpr uint16_t kLedBrakeMinDuty = 8;
+constexpr uint16_t kLedBrakeMaxDuty = kLedThrottleMaxDuty;
 constexpr uint16_t kLedFastBlinkIntervalMs = 100;
 constexpr uint16_t kLedLongBlinkOnMs = 700;
 constexpr uint16_t kLedLongBlinkOffMs = 350;
@@ -40,9 +43,11 @@ constexpr uint8_t kAdcSclPin = 22;
 constexpr uint32_t kAdcI2cClockHz = 100000;
 constexpr uint16_t kAdcReadIntervalMs = 5000;
 constexpr uint16_t kAdcMissingLogIntervalMs = 5000;
-constexpr float kAds1115VoltsPerBit = 4.096F / 32768.0F;
+constexpr float kAds1115VoltsPerBit = 6.144F / 32768.0F;
 constexpr uint8_t kThrottleAdcChannel = 0;
+constexpr uint8_t kBrakePressureAdcChannel = 1;
 constexpr uint16_t kThrottleAdcReadIntervalMs = 20;
+constexpr uint16_t kBrakePressureAdcReadIntervalMs = 20;
 constexpr uint16_t kThrottleZeroCalibrationMs = 1000;
 constexpr uint16_t kThrottleOpenCalibrationPauseMs = 2000;
 constexpr uint16_t kThrottleOpenCalibrationMs = 2000;
@@ -54,6 +59,8 @@ constexpr float kMinThrottleFullCalibrationVolts = 1.5F;
 constexpr float kMaxThrottleCalibrationDeltaVolts = 0.1F;
 constexpr float kThrottleAdcFilterAlpha = 0.3F;
 constexpr float kThrottlePercentDeadband = 0.2F;
+constexpr float kBrakePressureZeroVolts = 0.5F;
+constexpr float kBrakePressureFullVolts = 4.5F;
 constexpr char kThrottleCalibrationPrefsNamespace[] = "throttle";
 constexpr char kThrottleZeroPrefsKey[] = "zero_v";
 constexpr char kThrottleFullPrefsKey[] = "full_v";
@@ -76,6 +83,7 @@ uint32_t lastLedIdleBlinkMs = 0;
 uint32_t lastAdcReadMs = 0;
 uint32_t lastAdcMissingLogMs = 0;
 uint32_t lastThrottleAdcReadMs = 0;
+uint32_t lastBrakePressureAdcReadMs = 0;
 uint8_t adcI2cAddress = 0;
 int16_t throttleAdcRaw = 0;
 float throttleAdcVolts = 0.0F;
@@ -86,10 +94,14 @@ float throttleFullVolts = kDefaultThrottleFullVolts;
 bool throttleAdcValid = false;
 bool throttleFilterInitialized = false;
 bool throttleCalibrationPrefsReady = false;
+int16_t brakePressureAdcRaw = 0;
+float brakePressureAdcVolts = 0.0F;
+float brakePressureBar = 0.0F;
+bool brakePressureAdcValid = false;
 bool ledOn = false;
 bool ledIdleBlinkOn = false;
 bool ledIdleConnected = false;
-bool ledThrottleActive = false;
+bool ledSensorActive = false;
 
 uint16_t readUint16Be(const uint8_t *data) {
   return (static_cast<uint16_t>(data[0]) << 8) | data[1];
@@ -152,7 +164,7 @@ bool readAds1115SingleEnded(uint8_t channel, int16_t &rawValue, float &volts) {
   constexpr uint8_t kConfigRegister = 0x01;
   const uint16_t mux = static_cast<uint16_t>(0x04 + channel) << 12;
   const uint16_t config =
-      0x8000 | mux | 0x0200 | 0x0100 | 0x00E0 | 0x0003;
+      0x8000 | mux | 0x0000 | 0x0100 | 0x00E0 | 0x0003;
 
   if (!writeAds1115Register(kConfigRegister, config)) {
     return false;
@@ -232,10 +244,33 @@ float adcVoltsToThrottlePercent(float volts) {
                    100.0F);
 }
 
+float adcVoltsToBrakePressureBar(float volts) {
+  constexpr float kBrakePressureSpanVolts =
+      kBrakePressureFullVolts - kBrakePressureZeroVolts;
+
+  return constrain((volts - kBrakePressureZeroVolts) *
+                       static_cast<float>(kMaxBrakePressureBar) /
+                       kBrakePressureSpanVolts,
+                   0.0F,
+                   static_cast<float>(kMaxBrakePressureBar));
+}
+
 void invalidateThrottleAdc() {
   throttleAdcValid = false;
   throttleFilterInitialized = false;
   throttlePercent = 0.0F;
+}
+
+void invalidateBrakePressureAdc() {
+  brakePressureAdcValid = false;
+  brakePressureAdcRaw = 0;
+  brakePressureAdcVolts = 0.0F;
+  brakePressureBar = 0.0F;
+}
+
+void invalidateAdcMeasurements() {
+  invalidateThrottleAdc();
+  invalidateBrakePressureAdc();
 }
 
 float updateThrottleFilteredVolts(float volts, bool resetFilter) {
@@ -264,6 +299,13 @@ void updateThrottleAdcState(int16_t rawValue, float volts, bool resetFilter) {
   throttleAdcValid = true;
 }
 
+void updateBrakePressureAdcState(int16_t rawValue, float volts) {
+  brakePressureAdcRaw = rawValue;
+  brakePressureAdcVolts = volts;
+  brakePressureBar = adcVoltsToBrakePressureBar(volts);
+  brakePressureAdcValid = true;
+}
+
 void updateThrottleFromAdc(uint32_t now) {
   if (adcI2cAddress == 0 ||
       now - lastThrottleAdcReadMs < kThrottleAdcReadIntervalMs) {
@@ -279,11 +321,33 @@ void updateThrottleFromAdc(uint32_t now) {
                   kThrottleAdcChannel,
                   adcI2cAddress);
     adcI2cAddress = 0;
-    invalidateThrottleAdc();
+    invalidateAdcMeasurements();
     return;
   }
 
   updateThrottleAdcState(rawValue, volts, false);
+}
+
+void updateBrakePressureFromAdc(uint32_t now) {
+  if (adcI2cAddress == 0 ||
+      now - lastBrakePressureAdcReadMs < kBrakePressureAdcReadIntervalMs) {
+    return;
+  }
+
+  lastBrakePressureAdcReadMs = now;
+
+  int16_t rawValue = 0;
+  float volts = 0.0F;
+  if (!readAds1115SingleEnded(kBrakePressureAdcChannel, rawValue, volts)) {
+    Serial.printf("ADS1115 brake pressure A%u read failed at 0x%02X, will retry scan\n",
+                  kBrakePressureAdcChannel,
+                  adcI2cAddress);
+    adcI2cAddress = 0;
+    invalidateAdcMeasurements();
+    return;
+  }
+
+  updateBrakePressureAdcState(rawValue, volts);
 }
 
 void setLedDuty(uint16_t duty) {
@@ -302,6 +366,23 @@ uint16_t throttlePercentToLedDuty(float percent) {
   return static_cast<uint16_t>(
       lroundf(powf(normalized, kLedThrottleGamma) *
               static_cast<float>(kLedThrottleMaxDuty)));
+}
+
+uint16_t brakePressureBarToLedDuty(float pressureBar) {
+  if (pressureBar <= kLedBrakePressureThresholdBar) {
+    return 0;
+  }
+
+  pressureBar = constrain(pressureBar,
+                          kLedBrakePressureThresholdBar,
+                          kLedBrakePressureFullBar);
+  const float normalized =
+      (pressureBar - kLedBrakePressureThresholdBar) /
+      (kLedBrakePressureFullBar - kLedBrakePressureThresholdBar);
+  return static_cast<uint16_t>(
+      lroundf(static_cast<float>(kLedBrakeMinDuty) +
+              normalized * static_cast<float>(kLedBrakeMaxDuty -
+                                              kLedBrakeMinDuty)));
 }
 
 void startLedFastBlink(uint32_t now) {
@@ -338,15 +419,28 @@ void startLedIdleBlink(uint32_t now) {
 }
 
 void updateLedIdleBlink(uint32_t now) {
+  uint16_t sensorLedDuty = 0;
+
   if (throttleAdcValid && throttlePercent > kLedThrottleThresholdPercent) {
-    ledThrottleActive = true;
+    sensorLedDuty = max<uint16_t>(sensorLedDuty,
+                                  throttlePercentToLedDuty(throttlePercent));
+  }
+
+  if (brakePressureAdcValid &&
+      brakePressureBar > kLedBrakePressureThresholdBar) {
+    sensorLedDuty = max<uint16_t>(sensorLedDuty,
+                                  brakePressureBarToLedDuty(brakePressureBar));
+  }
+
+  if (sensorLedDuty > 0) {
+    ledSensorActive = true;
     ledIdleBlinkOn = false;
-    setLedDuty(throttlePercentToLedDuty(throttlePercent));
+    setLedDuty(sensorLedDuty);
     return;
   }
 
-  if (ledThrottleActive) {
-    ledThrottleActive = false;
+  if (ledSensorActive) {
+    ledSensorActive = false;
     ledIdleBlinkOn = false;
     lastLedIdleBlinkMs = now;
     setLed(false);
@@ -658,7 +752,7 @@ void printAdcReadings(uint32_t now) {
     if (!readAds1115SingleEnded(channel, rawValues[channel], volts[channel])) {
       Serial.printf("ADS1115 ADC read failed at 0x%02X, will retry scan\n", adcI2cAddress);
       adcI2cAddress = 0;
-      invalidateThrottleAdc();
+      invalidateAdcMeasurements();
       return;
     }
   }
@@ -666,15 +760,18 @@ void printAdcReadings(uint32_t now) {
   updateThrottleAdcState(rawValues[kThrottleAdcChannel],
                          volts[kThrottleAdcChannel],
                          false);
+  updateBrakePressureAdcState(rawValues[kBrakePressureAdcChannel],
+                              volts[kBrakePressureAdcChannel]);
 
   Serial.printf(
-      "ADC ADS1115 A0=%d %.3fV filtered=%.3fV throttle=%.1f%%, A1=%d %.3fV, A2=%d %.3fV, A3=%d %.3fV\n",
+      "ADC ADS1115 A0=%d %.3fV filtered=%.3fV throttle=%.1f%%, A1=%d %.3fV brake=%.1f bar, A2=%d %.3fV, A3=%d %.3fV\n",
       rawValues[0],
       volts[0],
       throttleFilteredVolts,
       throttlePercent,
       rawValues[1],
       volts[1],
+      brakePressureBar,
       rawValues[2],
       volts[2],
       rawValues[3],
@@ -684,15 +781,6 @@ void printAdcReadings(uint32_t now) {
 uint16_t pressureBarToCentibar(float pressureBar) {
   pressureBar = constrain(pressureBar, 0.0F, static_cast<float>(kMaxBrakePressureBar));
   return static_cast<uint16_t>(lroundf(pressureBar * 100.0F));
-}
-
-float emulateBrakePressure(uint32_t nowMs) {
-  const uint32_t cycleMs = nowMs % (kBrakeRampMs * 2UL);
-  const bool rampUp = cycleMs <= kBrakeRampMs;
-  const uint32_t rampPositionMs = rampUp ? cycleMs : (kBrakeRampMs * 2UL - cycleMs);
-
-  return static_cast<float>(rampPositionMs) * 100.0F /
-         static_cast<float>(kBrakeRampMs);
 }
 
 bool shouldSendPid(uint32_t pid) {
@@ -816,10 +904,9 @@ void startRaceChronoBle() {
       BLECharacteristic::PROPERTY_WRITE);
   canFilterCharacteristic->setCallbacks(new RaceChronoCanFilterCallbacks());
 
-  const float initialPressureBar = emulateBrakePressure(millis());
   uint8_t initialPacket[8] = {};
   writeUint32Le(initialPacket, kBrakePressurePid);
-  writeUint16Be(initialPacket + 4, pressureBarToCentibar(initialPressureBar));
+  writeUint16Be(initialPacket + 4, pressureBarToCentibar(brakePressureBar));
   canMainCharacteristic->setValue(initialPacket, sizeof(initialPacket));
 
   raceChronoService->start();
@@ -856,9 +943,9 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
-  const float brakePressureBar = emulateBrakePressure(now);
 
   updateThrottleFromAdc(now);
+  updateBrakePressureFromAdc(now);
   updateLedIdleBlink(now);
 
   if (bleClientConnected && now - lastCanNotifyMs >= notifyIntervalMs) {
@@ -884,12 +971,15 @@ void loop() {
     lastStatusLogMs = now;
 
     Serial.printf(
-        "uptime=%lu ms, free_heap=%u bytes, cpu=%u MHz, ble=%s, brake=%.1f bar, throttle=%.1f %% (A0=%s %.3fV raw=%d)\n",
+        "uptime=%lu ms, free_heap=%u bytes, cpu=%u MHz, ble=%s, brake=%.1f bar (A1=%s %.3fV raw=%d), throttle=%.1f %% (A0=%s %.3fV raw=%d)\n",
         static_cast<unsigned long>(now),
         ESP.getFreeHeap(),
         ESP.getCpuFreqMHz(),
         bleClientConnected ? "connected" : "advertising",
         brakePressureBar,
+        brakePressureAdcValid ? "ok" : "missing",
+        brakePressureAdcVolts,
+        brakePressureAdcRaw,
         throttlePercent,
         throttleAdcValid ? "ok" : "missing",
         throttleAdcVolts,
