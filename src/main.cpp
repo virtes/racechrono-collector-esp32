@@ -47,10 +47,12 @@ constexpr uint16_t kAdcMissingLogIntervalMs = 5000;
 constexpr float kAds1115VoltsPerBit = 6.144F / 32768.0F;
 constexpr uint8_t kThrottleAdcChannel = 0;
 constexpr uint8_t kBrakePressureAdcChannel = 1;
-constexpr uint8_t kBatteryAdcChannel = 2;
 constexpr uint16_t kThrottleAdcReadIntervalMs = 20;
 constexpr uint16_t kBrakePressureAdcReadIntervalMs = 20;
+constexpr uint8_t kBatteryAdcPin = 34;
+constexpr uint8_t kBatteryAdcResolutionBits = 12;
 constexpr uint16_t kBatteryAdcReadIntervalMs = 1000;
+constexpr uint8_t kBatteryAdcSampleCount = 8;
 constexpr uint16_t kThrottleZeroCalibrationMs = 1000;
 constexpr uint16_t kThrottleOpenCalibrationPauseMs = 2000;
 constexpr uint16_t kThrottleOpenCalibrationMs = 2000;
@@ -70,7 +72,7 @@ constexpr float kBrakePressureZeroVolts =
 constexpr float kBrakePressureFullVolts =
     kBrakePressureSupplyVolts * kBrakePressureFullRatio;
 constexpr float kBrakePressureHoldDeadbandBar = 0.25F;
-constexpr float kBatteryDividerMultiplier = 2.013564F;
+constexpr float kBatteryDividerMultiplier = 1.951091F;
 constexpr float kBatteryAdcFilterAlpha = 0.2F;
 constexpr char kThrottleCalibrationPrefsNamespace[] = "throttle";
 constexpr char kThrottleZeroPrefsKey[] = "zero_v";
@@ -199,6 +201,27 @@ bool readAds1115SingleEnded(uint8_t channel, int16_t &rawValue, float &volts) {
   return true;
 }
 
+bool readBatteryAdc(int16_t &rawValue, float &volts) {
+  uint32_t rawSum = 0;
+  uint32_t millivoltsSum = 0;
+
+  (void)analogRead(kBatteryAdcPin);
+  delayMicroseconds(50);
+
+  for (uint8_t i = 0; i < kBatteryAdcSampleCount; ++i) {
+    rawSum += analogRead(kBatteryAdcPin);
+    millivoltsSum += analogReadMilliVolts(kBatteryAdcPin);
+    delayMicroseconds(50);
+  }
+
+  rawValue = static_cast<int16_t>(
+      lroundf(static_cast<float>(rawSum) /
+              static_cast<float>(kBatteryAdcSampleCount)));
+  volts = static_cast<float>(millivoltsSum) /
+          static_cast<float>(kBatteryAdcSampleCount) / 1000.0F;
+  return true;
+}
+
 bool isThrottleZeroCalibrationValid(float volts) {
   return volts >= 0.0F && volts < kMaxThrottleZeroCalibrationVolts;
 }
@@ -302,10 +325,9 @@ void invalidateBatteryAdc() {
   batteryVolts = 0.0F;
 }
 
-void invalidateAdcMeasurements() {
+void invalidateAds1115Measurements() {
   invalidateThrottleAdc();
   invalidateBrakePressureAdc();
-  invalidateBatteryAdc();
 }
 
 float updateThrottleFilteredVolts(float volts, bool resetFilter) {
@@ -389,7 +411,7 @@ void updateThrottleFromAdc(uint32_t now) {
                   kThrottleAdcChannel,
                   adcI2cAddress);
     adcI2cAddress = 0;
-    invalidateAdcMeasurements();
+    invalidateAds1115Measurements();
     return;
   }
 
@@ -411,7 +433,7 @@ void updateBrakePressureFromAdc(uint32_t now) {
                   kBrakePressureAdcChannel,
                   adcI2cAddress);
     adcI2cAddress = 0;
-    invalidateAdcMeasurements();
+    invalidateAds1115Measurements();
     return;
   }
 
@@ -419,7 +441,7 @@ void updateBrakePressureFromAdc(uint32_t now) {
 }
 
 void updateBatteryFromAdc(uint32_t now) {
-  if (adcI2cAddress == 0 ||
+  if (batteryAdcValid &&
       now - lastBatteryAdcReadMs < kBatteryAdcReadIntervalMs) {
     return;
   }
@@ -428,12 +450,9 @@ void updateBatteryFromAdc(uint32_t now) {
 
   int16_t rawValue = 0;
   float volts = 0.0F;
-  if (!readAds1115SingleEnded(kBatteryAdcChannel, rawValue, volts)) {
-    Serial.printf("ADS1115 battery A%u read failed at 0x%02X, will retry scan\n",
-                  kBatteryAdcChannel,
-                  adcI2cAddress);
-    adcI2cAddress = 0;
-    invalidateAdcMeasurements();
+  if (!readBatteryAdc(rawValue, volts)) {
+    Serial.printf("ESP32 battery ADC GPIO%u read failed\n", kBatteryAdcPin);
+    invalidateBatteryAdc();
     return;
   }
 
@@ -813,6 +832,17 @@ void startAdc() {
       kAdcSclPin);
 }
 
+void startBatteryAdc() {
+  pinMode(kBatteryAdcPin, INPUT);
+  analogReadResolution(kBatteryAdcResolutionBits);
+  analogSetPinAttenuation(kBatteryAdcPin, ADC_11db);
+
+  Serial.printf(
+      "Battery voltage ADC on ESP32 GPIO%u, resolution=%u bits, attenuation=11dB\n",
+      kBatteryAdcPin,
+      kBatteryAdcResolutionBits);
+}
+
 void printAdcReadings(uint32_t now) {
   if (adcI2cAddress == 0) {
     if (now - lastAdcMissingLogMs >= kAdcMissingLogIntervalMs) {
@@ -842,7 +872,7 @@ void printAdcReadings(uint32_t now) {
     if (!readAds1115SingleEnded(channel, rawValues[channel], volts[channel])) {
       Serial.printf("ADS1115 ADC read failed at 0x%02X, will retry scan\n", adcI2cAddress);
       adcI2cAddress = 0;
-      invalidateAdcMeasurements();
+      invalidateAds1115Measurements();
       return;
     }
   }
@@ -852,11 +882,9 @@ void printAdcReadings(uint32_t now) {
                          false);
   updateBrakePressureAdcState(rawValues[kBrakePressureAdcChannel],
                               volts[kBrakePressureAdcChannel]);
-  updateBatteryAdcState(rawValues[kBatteryAdcChannel],
-                        volts[kBatteryAdcChannel]);
 
   Serial.printf(
-      "ADC ADS1115 A0=%d %.3fV filtered=%.3fV throttle=%.1f%%, A1=%d %.3fV brake=%.1f bar, A2=%d %.3fV battery=%.3fV filtered=%.3fV, A3=%d %.3fV\n",
+      "ADC ADS1115 A0=%d %.3fV filtered=%.3fV throttle=%.1f%%, A1=%d %.3fV brake=%.1f bar, A2=%d %.3fV unused, A3=%d %.3fV; ESP32 GPIO%u=%s %.3fV raw=%d battery=%.3fV filtered=%.3fV\n",
       rawValues[0],
       volts[0],
       throttleFilteredVolts,
@@ -866,10 +894,14 @@ void printAdcReadings(uint32_t now) {
       brakePressureBar,
       rawValues[2],
       volts[2],
-      batteryMeasuredVolts,
-      batteryVolts,
       rawValues[3],
-      volts[3]);
+      volts[3],
+      kBatteryAdcPin,
+      batteryAdcValid ? "ok" : "missing",
+      batteryAdcVolts,
+      batteryAdcRaw,
+      batteryMeasuredVolts,
+      batteryVolts);
 }
 
 uint16_t pressureBarToCentibar(float pressureBar) {
@@ -1051,6 +1083,7 @@ void setup() {
                 static_cast<unsigned long>(kBatteryVoltagePid));
 
   loadThrottleCalibration();
+  startBatteryAdc();
   startAdc();
   calibrateThrottle();
   startRaceChronoBle();
@@ -1088,7 +1121,7 @@ void loop() {
     lastStatusLogMs = now;
 
     Serial.printf(
-        "uptime=%lu ms, free_heap=%u bytes, cpu=%u MHz, ble=%s, brake=%.1f bar (A1=%s %.3fV raw=%d), throttle=%.1f %% (A0=%s %.3fV raw=%d), battery=%.3f V filtered (A2=%s %.3fV instant=%.3f V raw=%d)\n",
+        "uptime=%lu ms, free_heap=%u bytes, cpu=%u MHz, ble=%s, brake=%.1f bar (A1=%s %.3fV raw=%d), throttle=%.1f %% (A0=%s %.3fV raw=%d), battery=%.3f V filtered (GPIO%u=%s %.3fV instant=%.3f V raw=%d)\n",
         static_cast<unsigned long>(now),
         ESP.getFreeHeap(),
         ESP.getCpuFreqMHz(),
@@ -1102,6 +1135,7 @@ void loop() {
         throttleAdcVolts,
         throttleAdcRaw,
         batteryVolts,
+        kBatteryAdcPin,
         batteryAdcValid ? "ok" : "missing",
         batteryAdcVolts,
         batteryMeasuredVolts,
