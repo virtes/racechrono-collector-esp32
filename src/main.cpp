@@ -90,8 +90,16 @@ constexpr float kBrakePressureHoldDeadbandBar = 0.25F;
 constexpr float kBatteryDividerMultiplier = 1.951091F;
 constexpr float kBatteryAdcFilterAlpha = 0.2F;
 constexpr float kAfrDividerMultiplier = 2.0F;
-constexpr float kAfrAtZeroVolts = 10.0F;
-constexpr float kAfrAtFiveVolts = 20.0F;
+constexpr float kAfrCalibrationLowVolts = 2.47F;
+constexpr float kAfrCalibrationLow = 15.3F;
+constexpr float kAfrCalibrationHighVolts = 4.764F;
+constexpr float kAfrCalibrationHigh = 20.0F;
+constexpr float kAfrCalibrationAfrPerVolt =
+    (kAfrCalibrationHigh - kAfrCalibrationLow) /
+    (kAfrCalibrationHighVolts - kAfrCalibrationLowVolts);
+constexpr float kAfrAtZeroVolts =
+    kAfrCalibrationLow -
+    kAfrCalibrationLowVolts * kAfrCalibrationAfrPerVolt;
 constexpr char kThrottleCalibrationPrefsNamespace[] = "throttle";
 constexpr char kThrottleZeroPrefsKey[] = "zero_v";
 constexpr char kThrottleFullPrefsKey[] = "full_v";
@@ -369,11 +377,13 @@ float adcVoltsToBatteryVolts(float volts) {
 
 float adcVoltsToAfr(float volts) {
   const float signalVolts = max(0.0F, volts * kAfrDividerMultiplier);
-  constexpr float kAfrSpan = kAfrAtFiveVolts - kAfrAtZeroVolts;
+  const float afr =
+      kAfrCalibrationLow +
+      (signalVolts - kAfrCalibrationLowVolts) * kAfrCalibrationAfrPerVolt;
 
-  return constrain(kAfrAtZeroVolts + signalVolts * kAfrSpan / 5.0F,
+  return constrain(afr,
                    kAfrAtZeroVolts,
-                   kAfrAtFiveVolts);
+                   kAfrCalibrationHigh);
 }
 
 void invalidateThrottleAdc() {
@@ -1211,7 +1221,7 @@ uint16_t rpmToUint16(float rpm) {
 }
 
 uint16_t afrToCentiAfr(float afr) {
-  afr = constrain(afr, kAfrAtZeroVolts, kAfrAtFiveVolts);
+  afr = constrain(afr, kAfrAtZeroVolts, kAfrCalibrationHigh);
   return static_cast<uint16_t>(lroundf(afr * 100.0F));
 }
 
