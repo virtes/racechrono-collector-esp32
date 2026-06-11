@@ -23,7 +23,9 @@ constexpr uint32_t kThrottlePositionPid = 0x00000102;
 constexpr uint32_t kBatteryVoltagePid = 0x00000103;
 constexpr uint32_t kEngineRpmPid = 0x00000104;
 constexpr uint32_t kAfrPid = 0x00000105;
+constexpr uint32_t kGpsSatellitesInViewPid = 0x00000106;
 constexpr uint16_t kDefaultNotifyIntervalMs = 20;
+constexpr uint16_t kGpsSatellitesInViewNotifyIntervalMs = 1000;
 constexpr uint16_t kBleTxLogIntervalMs = 30000;
 constexpr uint16_t kMaxBrakePressureBar = 250;
 constexpr uint8_t kLedPin = 5;
@@ -63,7 +65,7 @@ constexpr uint8_t kAfrAdcChannel = 2;
 constexpr uint16_t kThrottleAdcReadIntervalMs = 20;
 constexpr uint16_t kBrakePressureAdcReadIntervalMs = 20;
 constexpr uint16_t kAfrAdcReadIntervalMs = 20;
-constexpr uint8_t kBatteryAdcPin = 34;
+constexpr uint8_t kBatteryAdcPin = 35;
 constexpr uint8_t kBatteryAdcResolutionBits = 12;
 constexpr uint16_t kBatteryAdcReadIntervalMs = 1000;
 constexpr uint8_t kBatteryAdcSampleCount = 8;
@@ -90,6 +92,7 @@ constexpr uint16_t kGpsDebugLogIntervalMs = 2000;
 constexpr uint16_t kGpsBaudProbeIntervalMs = 6000;
 constexpr uint8_t kGpsDebugRawSampleSize = 96;
 constexpr uint8_t kGpsDebugHexSampleByteCount = 32;
+constexpr uint16_t kGpsSignalConfigPollTimeoutMs = 700;
 constexpr uint16_t kThrottleZeroCalibrationMs = 1000;
 constexpr uint16_t kThrottleOpenCalibrationPauseMs = 2000;
 constexpr uint16_t kThrottleOpenCalibrationMs = 2000;
@@ -125,12 +128,45 @@ constexpr float kAfrAtZeroVolts =
 constexpr char kThrottleCalibrationPrefsNamespace[] = "throttle";
 constexpr char kThrottleZeroPrefsKey[] = "zero_v";
 constexpr char kThrottleFullPrefsKey[] = "full_v";
+constexpr char kGpsConfigPrefsNamespace[] = "gps";
+constexpr char kGpsGlonassProfilePrefsKey[] = "glo_prof";
+
+constexpr uint8_t kGpsUbxClassCfg = 0x06;
+constexpr uint8_t kGpsUbxClassAck = 0x05;
+constexpr uint8_t kGpsUbxIdAckNak = 0x00;
+constexpr uint8_t kGpsUbxIdAckAck = 0x01;
+constexpr uint8_t kGpsUbxIdCfgPrt = 0x00;
+constexpr uint8_t kGpsUbxIdValset = 0x8A;
+constexpr uint8_t kGpsUbxIdValget = 0x8B;
+constexpr uint8_t kGpsUbxValsetLayerRam = 0x01;
+constexpr uint8_t kGpsUbxValsetLayerBatteryBackedRam = 0x02;
+constexpr uint8_t kGpsUbxValsetLayerFlash = 0x04;
+constexpr uint8_t kGpsUbxValsetLayerPersistent =
+    kGpsUbxValsetLayerRam |
+    kGpsUbxValsetLayerBatteryBackedRam |
+    kGpsUbxValsetLayerFlash;
+constexpr uint8_t kGpsUbxValgetLayerRam = 0x00;
+constexpr uint16_t kGpsUbxProtocolUbx = 0x0001;
+constexpr uint16_t kGpsUbxProtocolNmea = 0x0002;
+constexpr uint32_t kGpsSignalGpsEnaKey = 0x1031001F;
+constexpr uint32_t kGpsSignalGpsL1CaEnaKey = 0x10310001;
+constexpr uint32_t kGpsSignalSbasEnaKey = 0x10310020;
+constexpr uint32_t kGpsSignalSbasL1CaEnaKey = 0x10310005;
+constexpr uint32_t kGpsSignalGalEnaKey = 0x10310021;
+constexpr uint32_t kGpsSignalGalE1EnaKey = 0x10310007;
+constexpr uint32_t kGpsSignalBdsEnaKey = 0x10310022;
+constexpr uint32_t kGpsSignalBdsB1EnaKey = 0x1031000D;
+constexpr uint32_t kGpsSignalQzssEnaKey = 0x10310024;
+constexpr uint32_t kGpsSignalQzssL1CaEnaKey = 0x10310012;
+constexpr uint32_t kGpsSignalGloEnaKey = 0x10310025;
+constexpr uint32_t kGpsSignalGloL1EnaKey = 0x10310018;
 
 BLEServer *bleServer = nullptr;
 BLECharacteristic *canMainCharacteristic = nullptr;
 BLECharacteristic *gpsMainCharacteristic = nullptr;
 BLECharacteristic *gpsTimeCharacteristic = nullptr;
 Preferences throttleCalibrationPrefs;
+Preferences gpsConfigPrefs;
 Adafruit_SSD1306 display(kDisplayWidth,
                          kDisplayHeight,
                          &Wire,
@@ -139,6 +175,11 @@ HardwareSerial gpsSerial(2);
 TinyGPSPlus gps;
 TinyGPSCustom gpsGgaFixQuality(gps, "GPGGA", 6);
 TinyGPSCustom gpsGpgsvSatellitesInView(gps, "GPGSV", 3);
+TinyGPSCustom gpsGlgsvSatellitesInView(gps, "GLGSV", 3);
+TinyGPSCustom gpsGagsvSatellitesInView(gps, "GAGSV", 3);
+TinyGPSCustom gpsGbgsvSatellitesInView(gps, "GBGSV", 3);
+TinyGPSCustom gpsBdgsvSatellitesInView(gps, "BDGSV", 3);
+TinyGPSCustom gpsQzgsvSatellitesInView(gps, "QZGSV", 3);
 TinyGPSCustom gpsGngsvSatellitesInView(gps, "GNGSV", 3);
 
 bool bleClientConnected = false;
@@ -149,8 +190,10 @@ bool throttlePositionPidAllowed = true;
 bool batteryVoltagePidAllowed = true;
 bool engineRpmPidAllowed = true;
 bool afrPidAllowed = true;
+bool gpsSatellitesInViewPidAllowed = true;
 uint16_t notifyIntervalMs = kDefaultNotifyIntervalMs;
 uint32_t lastCanNotifyMs = 0;
+uint32_t lastGpsSatellitesInViewNotifyMs = 0;
 uint32_t lastBleTxLogMs = 0;
 uint32_t lastLedToggleMs = 0;
 uint32_t lastLedIdleBlinkMs = 0;
@@ -195,6 +238,8 @@ float throttleFullVolts = kDefaultThrottleFullVolts;
 bool throttleAdcValid = false;
 bool throttleFilterInitialized = false;
 bool throttleCalibrationPrefsReady = false;
+bool gpsConfigPrefsReady = false;
+bool gpsGlonassProfilePersisted = false;
 int16_t brakePressureAdcRaw = 0;
 float brakePressureAdcVolts = 0.0F;
 float brakePressureBar = 0.0F;
@@ -274,6 +319,13 @@ uint32_t readUint32Be(const uint8_t *data) {
          (static_cast<uint32_t>(data[1]) << 16) |
          (static_cast<uint32_t>(data[2]) << 8) |
          data[3];
+}
+
+uint32_t readUint32Le(const uint8_t *data) {
+  return static_cast<uint32_t>(data[0]) |
+         (static_cast<uint32_t>(data[1]) << 8) |
+         (static_cast<uint32_t>(data[2]) << 16) |
+         (static_cast<uint32_t>(data[3]) << 24);
 }
 
 void writeUint16Be(uint8_t *data, uint16_t value) {
@@ -437,6 +489,31 @@ void saveThrottleCalibrationValue(const char *key, float volts) {
   }
 
   throttleCalibrationPrefs.putFloat(key, volts);
+}
+
+void loadGpsConfigState() {
+  gpsConfigPrefsReady = gpsConfigPrefs.begin(kGpsConfigPrefsNamespace, false);
+  if (!gpsConfigPrefsReady) {
+    Serial.println("GNSS config NVS unavailable");
+    return;
+  }
+
+  gpsGlonassProfilePersisted =
+      gpsConfigPrefs.getBool(kGpsGlonassProfilePrefsKey, false);
+  if (gpsGlonassProfilePersisted) {
+    Serial.println("GNSS config NVS: GLONASS profile was previously ACKed as persistent");
+    Serial.println("GNSS profile expected: GPS=on, SBAS=on, Galileo=on, BeiDou=off, QZSS=on, GLONASS=on");
+  }
+}
+
+void markGpsGlonassProfilePersisted() {
+  gpsGlonassProfilePersisted = true;
+  if (!gpsConfigPrefsReady) {
+    Serial.println("GNSS config NVS unavailable, persistent ACK flag not saved");
+    return;
+  }
+
+  gpsConfigPrefs.putBool(kGpsGlonassProfilePrefsKey, true);
 }
 
 float adcVoltsToThrottlePercent(float volts) {
@@ -1286,6 +1363,11 @@ void writeGpsUbxByte(uint8_t value, uint8_t &checksumA, uint8_t &checksumB) {
   checksumB += checksumA;
 }
 
+void updateGpsUbxChecksum(uint8_t value, uint8_t &checksumA, uint8_t &checksumB) {
+  checksumA += value;
+  checksumB += checksumA;
+}
+
 void writeGpsUbxPacket(uint8_t messageClass,
                        uint8_t messageId,
                        const uint8_t *payload,
@@ -1313,18 +1395,431 @@ void writeGpsUbxPacket(uint8_t messageClass,
   gpsSerial.flush();
 }
 
-void sendGpsUbxSetUartNmea() {
+enum GpsUbxPollResult {
+  kGpsUbxPollSuccess,
+  kGpsUbxPollTimeout,
+  kGpsUbxPollNak,
+  kGpsUbxPollTooLong
+};
+
+struct GpsUbxPollStats {
+  uint32_t bytesRead;
+  uint16_t ubxHeaders;
+  uint16_t validFrames;
+  uint16_t unexpectedFrames;
+  uint8_t lastClass;
+  uint8_t lastId;
+};
+
+struct GpsSignalConfigItem {
+  const char *constellationName;
+  const char *signalName;
+  uint32_t constellationKey;
+  uint32_t signalKey;
+  bool constellationKnown;
+  bool constellationEnabled;
+  bool signalKnown;
+  bool signalEnabled;
+};
+
+GpsUbxPollResult readGpsUbxPacket(uint8_t expectedClass,
+                                  uint8_t expectedId,
+                                  uint8_t *payload,
+                                  uint16_t payloadCapacity,
+                                  uint16_t &payloadLength,
+                                  uint16_t timeoutMs,
+                                  GpsUbxPollStats *stats = nullptr) {
+  uint8_t state = 0;
+  uint8_t messageClass = 0;
+  uint8_t messageId = 0;
+  uint8_t checksumA = 0;
+  uint8_t checksumB = 0;
+  uint8_t expectedChecksumA = 0;
+  uint8_t expectedChecksumB = 0;
+  uint16_t messageLength = 0;
+  uint16_t payloadIndex = 0;
+  bool tooLong = false;
+  const uint32_t startedMs = millis();
+
+  while (millis() - startedMs < timeoutMs) {
+    while (gpsSerial.available() > 0) {
+      const uint8_t value = static_cast<uint8_t>(gpsSerial.read());
+      if (stats != nullptr) {
+        ++stats->bytesRead;
+      }
+      gps.encode(static_cast<char>(value));
+
+      switch (state) {
+        case 0:
+          state = (value == 0xB5) ? 1 : 0;
+          break;
+        case 1:
+          if (value == 0x62) {
+            if (stats != nullptr) {
+              ++stats->ubxHeaders;
+            }
+            state = 2;
+          } else {
+            state = (value == 0xB5) ? 1 : 0;
+          }
+          break;
+        case 2:
+          messageClass = value;
+          checksumA = 0;
+          checksumB = 0;
+          updateGpsUbxChecksum(value, checksumA, checksumB);
+          state = 3;
+          break;
+        case 3:
+          messageId = value;
+          updateGpsUbxChecksum(value, checksumA, checksumB);
+          state = 4;
+          break;
+        case 4:
+          messageLength = value;
+          updateGpsUbxChecksum(value, checksumA, checksumB);
+          state = 5;
+          break;
+        case 5:
+          messageLength |= static_cast<uint16_t>(value) << 8;
+          updateGpsUbxChecksum(value, checksumA, checksumB);
+          payloadIndex = 0;
+          tooLong = messageLength > payloadCapacity;
+          state = (messageLength == 0) ? 7 : 6;
+          break;
+        case 6:
+          updateGpsUbxChecksum(value, checksumA, checksumB);
+          if (!tooLong) {
+            payload[payloadIndex] = value;
+          }
+          ++payloadIndex;
+          if (payloadIndex >= messageLength) {
+            state = 7;
+          }
+          break;
+        case 7:
+          expectedChecksumA = value;
+          state = 8;
+          break;
+        case 8:
+          expectedChecksumB = value;
+          if (expectedChecksumA == checksumA && expectedChecksumB == checksumB) {
+            if (stats != nullptr) {
+              ++stats->validFrames;
+              stats->lastClass = messageClass;
+              stats->lastId = messageId;
+            }
+            if (messageClass == kGpsUbxClassAck &&
+                messageId == kGpsUbxIdAckNak &&
+                !tooLong &&
+                messageLength >= 2 &&
+                payload[0] == expectedClass &&
+                payload[1] == expectedId) {
+              return kGpsUbxPollNak;
+            }
+
+            if (messageClass == expectedClass && messageId == expectedId) {
+              if (tooLong) {
+                return kGpsUbxPollTooLong;
+              }
+
+              payloadLength = messageLength;
+              return kGpsUbxPollSuccess;
+            }
+
+            if (stats != nullptr) {
+              ++stats->unexpectedFrames;
+            }
+          }
+          state = 0;
+          break;
+      }
+    }
+
+    delay(1);
+  }
+
+  return kGpsUbxPollTimeout;
+}
+
+void writeGpsValgetKey(uint8_t *payload, uint16_t &offset, uint32_t key) {
+  writeUint32Le(payload + offset, key);
+  offset += 4;
+}
+
+void sendGpsSignalConfigValget() {
+  uint8_t payload[4 + 12 * 4] = {};
+  uint16_t offset = 0;
+  payload[offset++] = 0x00;  // version
+  payload[offset++] = kGpsUbxValgetLayerRam;
+  payload[offset++] = 0x00;  // position, little-endian
+  payload[offset++] = 0x00;
+
+  writeGpsValgetKey(payload, offset, kGpsSignalGpsEnaKey);
+  writeGpsValgetKey(payload, offset, kGpsSignalGpsL1CaEnaKey);
+  writeGpsValgetKey(payload, offset, kGpsSignalSbasEnaKey);
+  writeGpsValgetKey(payload, offset, kGpsSignalSbasL1CaEnaKey);
+  writeGpsValgetKey(payload, offset, kGpsSignalGalEnaKey);
+  writeGpsValgetKey(payload, offset, kGpsSignalGalE1EnaKey);
+  writeGpsValgetKey(payload, offset, kGpsSignalBdsEnaKey);
+  writeGpsValgetKey(payload, offset, kGpsSignalBdsB1EnaKey);
+  writeGpsValgetKey(payload, offset, kGpsSignalQzssEnaKey);
+  writeGpsValgetKey(payload, offset, kGpsSignalQzssL1CaEnaKey);
+  writeGpsValgetKey(payload, offset, kGpsSignalGloEnaKey);
+  writeGpsValgetKey(payload, offset, kGpsSignalGloL1EnaKey);
+
+  writeGpsUbxPacket(kGpsUbxClassCfg, kGpsUbxIdValget, payload, offset);
+}
+
+void sendGpsSignalConfigEnableGlonass(uint8_t layerMask) {
+  uint8_t payload[4 + 4 * 5] = {};
+  uint16_t offset = 0;
+  payload[offset++] = 0x00;  // version
+  payload[offset++] = layerMask;
+  payload[offset++] = 0x00;  // transaction
+  payload[offset++] = 0x00;  // reserved
+
+  writeGpsValgetKey(payload, offset, kGpsSignalBdsEnaKey);
+  payload[offset++] = 0x00;
+  writeGpsValgetKey(payload, offset, kGpsSignalBdsB1EnaKey);
+  payload[offset++] = 0x00;
+  writeGpsValgetKey(payload, offset, kGpsSignalGloEnaKey);
+  payload[offset++] = 0x01;
+  writeGpsValgetKey(payload, offset, kGpsSignalGloL1EnaKey);
+  payload[offset++] = 0x01;
+
+  writeGpsUbxPacket(kGpsUbxClassCfg, kGpsUbxIdValset, payload, offset);
+}
+
+void printGpsUbxPollStats(const GpsUbxPollStats &stats) {
+  Serial.printf("bytes=%lu, ubx_headers=%u, valid_ubx=%u, unexpected_ubx=%u, last=0x%02X/0x%02X",
+                static_cast<unsigned long>(stats.bytesRead),
+                stats.ubxHeaders,
+                stats.validFrames,
+                stats.unexpectedFrames,
+                stats.lastClass,
+                stats.lastId);
+}
+
+bool waitGpsUbxAck(uint8_t targetClass,
+                   uint8_t targetId,
+                   uint16_t timeoutMs,
+                   GpsUbxPollStats &stats) {
+  uint8_t payload[8] = {};
+  uint16_t payloadLength = 0;
+  const GpsUbxPollResult result =
+      readGpsUbxPacket(kGpsUbxClassAck,
+                       kGpsUbxIdAckAck,
+                       payload,
+                       sizeof(payload),
+                       payloadLength,
+                       timeoutMs,
+                       &stats);
+
+  return result == kGpsUbxPollSuccess &&
+         payloadLength >= 2 &&
+         payload[0] == targetClass &&
+         payload[1] == targetId;
+}
+
+const char *gpsSignalConfigText(bool known, bool enabled) {
+  if (!known) {
+    return "?";
+  }
+
+  return enabled ? "on" : "off";
+}
+
+void updateGpsSignalConfigItem(GpsSignalConfigItem &item,
+                               uint32_t key,
+                               bool enabled) {
+  if (key == item.constellationKey) {
+    item.constellationKnown = true;
+    item.constellationEnabled = enabled;
+  } else if (key == item.signalKey) {
+    item.signalKnown = true;
+    item.signalEnabled = enabled;
+  }
+}
+
+bool readGpsSignalConfigItems(GpsSignalConfigItem *items,
+                              uint8_t itemCount,
+                              const char *context) {
+  uint8_t responsePayload[96] = {};
+  uint16_t responsePayloadLength = 0;
+  GpsUbxPollStats stats = {};
+
+  sendGpsSignalConfigValget();
+  const GpsUbxPollResult result =
+      readGpsUbxPacket(kGpsUbxClassCfg,
+                       kGpsUbxIdValget,
+                       responsePayload,
+                       sizeof(responsePayload),
+                       responsePayloadLength,
+                       kGpsSignalConfigPollTimeoutMs,
+                       &stats);
+
+  if (result == kGpsUbxPollNak) {
+    Serial.printf("GNSS signal config (CFG-SIGNAL RAM): unavailable (%s: receiver rejected UBX-CFG-VALGET; ",
+                  context);
+    printGpsUbxPollStats(stats);
+    Serial.println(")");
+    return false;
+  }
+  if (result == kGpsUbxPollTooLong) {
+    Serial.printf("GNSS signal config (CFG-SIGNAL RAM): unavailable (%s: UBX-CFG-VALGET response too large; ",
+                  context);
+    printGpsUbxPollStats(stats);
+    Serial.println(")");
+    return false;
+  }
+  if (result != kGpsUbxPollSuccess || responsePayloadLength < 4) {
+    Serial.printf("GNSS signal config (CFG-SIGNAL RAM): unavailable (%s: no UBX-CFG-VALGET response; ",
+                  context);
+    printGpsUbxPollStats(stats);
+    Serial.println(")");
+    return false;
+  }
+
+  uint16_t offset = 4;
+  while (offset + 5 <= responsePayloadLength) {
+    const uint32_t key = readUint32Le(responsePayload + offset);
+    const bool enabled = responsePayload[offset + 4] != 0;
+    offset += 5;
+
+    for (uint8_t i = 0; i < itemCount; ++i) {
+      updateGpsSignalConfigItem(items[i], key, enabled);
+    }
+  }
+
+  return true;
+}
+
+void printGpsSignalConfigItems(const GpsSignalConfigItem *items,
+                               uint8_t itemCount) {
+  Serial.print("GNSS signal config (CFG-SIGNAL RAM): ");
+  for (uint8_t i = 0; i < itemCount; ++i) {
+    const GpsSignalConfigItem &item = items[i];
+    Serial.printf("%s=%s(%s=%s)",
+                  item.constellationName,
+                  gpsSignalConfigText(item.constellationKnown,
+                                      item.constellationEnabled),
+                  item.signalName,
+                  gpsSignalConfigText(item.signalKnown, item.signalEnabled));
+    Serial.print((i + 1 < itemCount) ? ", " : "\n");
+  }
+}
+
+void resetGpsSignalConfigItems(GpsSignalConfigItem *items) {
+  items[0] = {"GPS", "L1CA", kGpsSignalGpsEnaKey, kGpsSignalGpsL1CaEnaKey};
+  items[1] = {"SBAS", "L1CA", kGpsSignalSbasEnaKey, kGpsSignalSbasL1CaEnaKey};
+  items[2] = {"Galileo", "E1", kGpsSignalGalEnaKey, kGpsSignalGalE1EnaKey};
+  items[3] = {"BeiDou", "B1", kGpsSignalBdsEnaKey, kGpsSignalBdsB1EnaKey};
+  items[4] = {"QZSS", "L1CA", kGpsSignalQzssEnaKey, kGpsSignalQzssL1CaEnaKey};
+  items[5] = {"GLONASS", "L1", kGpsSignalGloEnaKey, kGpsSignalGloL1EnaKey};
+}
+
+bool isGpsSignalItemEnabled(const GpsSignalConfigItem &item) {
+  return item.constellationKnown &&
+         item.constellationEnabled &&
+         item.signalKnown &&
+         item.signalEnabled;
+}
+
+bool enableGpsGlonassWithLayers(uint8_t layerMask,
+                                const char *layerName,
+                                const char *reason) {
+  GpsUbxPollStats stats = {};
+  sendGpsSignalConfigEnableGlonass(layerMask);
+  const bool acknowledged =
+      waitGpsUbxAck(kGpsUbxClassCfg, kGpsUbxIdValset, 700, stats);
+  Serial.printf("GNSS signal config: GLONASS profile ack=%s, layers=%s, BeiDou=off, GLONASS=on (%s; ",
+                acknowledged ? "yes" : "no",
+                layerName,
+                reason);
+  printGpsUbxPollStats(stats);
+  Serial.println(")");
+  return acknowledged;
+}
+
+bool enableGpsGlonassBestEffort(const char *reason) {
+  if (enableGpsGlonassWithLayers(kGpsUbxValsetLayerPersistent,
+                                 "RAM+BBR+Flash",
+                                 reason)) {
+    markGpsGlonassProfilePersisted();
+    return true;
+  }
+
+  if (enableGpsGlonassWithLayers(kGpsUbxValsetLayerRam |
+                                     kGpsUbxValsetLayerBatteryBackedRam,
+                                 "RAM+BBR",
+                                 "Flash rejected, fallback")) {
+    return true;
+  }
+
+  return enableGpsGlonassWithLayers(kGpsUbxValsetLayerRam,
+                                    "RAM",
+                                    "persistent layers rejected, runtime fallback");
+}
+
+void logAndEnableGpsGlonassIfNeeded() {
+  constexpr uint8_t kItemCount = 6;
+  constexpr uint8_t kGlonassItemIndex = 5;
+  GpsSignalConfigItem items[kItemCount] = {};
+  resetGpsSignalConfigItems(items);
+
+  if (!readGpsSignalConfigItems(items, kItemCount, "before GLONASS enable")) {
+    if (gpsGlonassProfilePersisted) {
+      Serial.println("GNSS signal config: status unavailable, persistent GLONASS profile already ACKed; skipping GPS flash write");
+      Serial.println("GNSS profile expected: GPS=on, SBAS=on, Galileo=on, BeiDou=off, QZSS=on, GLONASS=on");
+      return;
+    }
+
+    enableGpsGlonassBestEffort("status unavailable, forced by user request");
+    return;
+  }
+
+  printGpsSignalConfigItems(items, kItemCount);
+  const GpsSignalConfigItem &glonassItem = items[kGlonassItemIndex];
+  if (isGpsSignalItemEnabled(glonassItem)) {
+    Serial.println("GNSS signal config: GLONASS already enabled");
+    return;
+  }
+
+  if (!glonassItem.constellationKnown || !glonassItem.signalKnown) {
+    Serial.println("GNSS signal config: GLONASS status unknown, not changing receiver config");
+    return;
+  }
+
+  const bool acknowledged = enableGpsGlonassBestEffort("GLONASS was disabled");
+  if (!acknowledged) {
+    return;
+  }
+
+  delay(50);
+  resetGpsSignalConfigItems(items);
+  if (readGpsSignalConfigItems(items, kItemCount, "after GLONASS enable")) {
+    printGpsSignalConfigItems(items, kItemCount);
+  }
+}
+
+void sendGpsUbxSetUartNmea(bool enableUbxOutput = false) {
+  const uint16_t outputProtocols =
+      enableUbxOutput ? (kGpsUbxProtocolUbx | kGpsUbxProtocolNmea)
+                      : kGpsUbxProtocolNmea;
   uint8_t payload[] = {
       0x01, 0x00,              // UART1
       0x00, 0x00,              // txReady disabled
       0xD0, 0x08, 0x00, 0x00,  // 8N1
       0x00, 0x00, 0x00, 0x00,  // baud, filled below
       0x03, 0x00,              // input: UBX + NMEA
-      0x02, 0x00,              // output: NMEA
+      0x00, 0x00,              // output, filled below
       0x00, 0x00,              // flags
       0x00, 0x00               // reserved
   };
   writeUint32Le(payload + 8, kGpsTargetBaudRate);
+  payload[14] = static_cast<uint8_t>(outputProtocols & 0xFF);
+  payload[15] = static_cast<uint8_t>(outputProtocols >> 8);
 
   writeGpsUbxPacket(0x06, 0x00, payload, sizeof(payload));
 }
@@ -1336,7 +1831,7 @@ void beginGpsSerial(uint32_t baudRate) {
 
 void configureGpsAtCurrentBaud(const char *reason) {
   sendGpsUbxSetUartNmea();
-  Serial.printf("GPS config: sent UBX-CFG-PRT at %lu baud, target NMEA %lu baud (%s)\n",
+  Serial.printf("GPS config: sent UBX-CFG-PRT at %lu baud, target NMEA %lu baud, output=NMEA (%s)\n",
                 static_cast<unsigned long>(gpsCurrentBaudRate),
                 static_cast<unsigned long>(kGpsTargetBaudRate),
                 reason);
@@ -1352,13 +1847,28 @@ void configureGpsAtCommonBaudRates(const char *reason) {
     beginGpsSerial(kGpsBaudRates[i]);
     delay(50);
     sendGpsUbxSetUartNmea();
-    Serial.printf("GPS config: sent UBX-CFG-PRT at %lu baud, target NMEA %lu baud (%s)\n",
+    Serial.printf("GPS config: sent UBX-CFG-PRT at %lu baud, target NMEA %lu baud, output=NMEA (%s)\n",
                   static_cast<unsigned long>(gpsCurrentBaudRate),
                   static_cast<unsigned long>(kGpsTargetBaudRate),
                   reason);
   }
 
   beginGpsSerial(kGpsTargetBaudRate);
+}
+
+void enableGpsUbxOutputForDiagnostics() {
+  sendGpsUbxSetUartNmea(true);
+  Serial.printf("GPS config: sent UBX-CFG-PRT at %lu baud, target NMEA %lu baud, output=UBX+NMEA (diagnostics)\n",
+                static_cast<unsigned long>(gpsCurrentBaudRate),
+                static_cast<unsigned long>(kGpsTargetBaudRate));
+  delay(50);
+}
+
+void restoreGpsNmeaOnlyOutput() {
+  sendGpsUbxSetUartNmea();
+  Serial.printf("GPS config: sent UBX-CFG-PRT at %lu baud, target NMEA %lu baud, output=NMEA (diagnostics done)\n",
+                static_cast<unsigned long>(gpsCurrentBaudRate),
+                static_cast<unsigned long>(kGpsTargetBaudRate));
 }
 
 void startGps() {
@@ -1368,11 +1878,14 @@ void startGps() {
   lastGpsDebugLogMs = now;
   lastGpsBaudProbeMs = now;
 
-  Serial.printf("GPS UART2 started: GY-NEO6MV2 TX -> ESP32 GPIO%u RX2, ESP32 GPIO%u TX2 -> GPS RX, baud=%lu\n",
+  Serial.printf("GPS UART2 started: GPS TX -> ESP32 GPIO%u RX2, ESP32 GPIO%u TX2 -> GPS RX, baud=%lu\n",
                 kGpsRxPin,
                 kGpsTxPin,
                 static_cast<unsigned long>(gpsCurrentBaudRate));
   configureGpsAtCommonBaudRates("startup");
+  enableGpsUbxOutputForDiagnostics();
+  logAndEnableGpsGlonassIfNeeded();
+  restoreGpsNmeaOnlyOutput();
 }
 
 void formatDisplayAdsVoltageLine(char *line,
@@ -1472,13 +1985,17 @@ void printAdcReadings(uint32_t now) {
   updateAfrAdcState(rawValues[kAfrAdcChannel], volts[kAfrAdcChannel]);
 
   Serial.printf(
-      "ADC throttle A0=%.3fV -> %.1f%%, brake A1=%.3fV -> %.1f bar, AFR A2=%.3fV -> %.2f, battery=%.3fV\n",
+      "ADC throttle A0=%.3fV -> %.1f%%, brake A1=%.3fV -> %.1f bar, AFR A2=%.3fV -> %.2f, battery GPIO%u raw=%d adc=%.3fV measured=%.3fV filtered=%.3fV\n",
       volts[kThrottleAdcChannel],
       throttlePercent,
       volts[kBrakePressureAdcChannel],
       brakePressureBar,
       volts[kAfrAdcChannel],
       afr,
+      kBatteryAdcPin,
+      batteryAdcRaw,
+      batteryAdcVolts,
+      batteryMeasuredVolts,
       batteryVolts);
 }
 
@@ -1538,16 +2055,65 @@ void formatGpsUnsigned(char *buffer,
   snprintf(buffer, bufferSize, "%lu", static_cast<unsigned long>(value));
 }
 
-void formatGpsSatellitesInView(char *buffer, size_t bufferSize) {
-  if (gpsGpgsvSatellitesInView.isValid() &&
-      gpsGpgsvSatellitesInView.age() <= kGpsFreshAgeMs) {
-    snprintf(buffer, bufferSize, "%u", atoi(gpsGpgsvSatellitesInView.value()));
-    return;
+bool readGpsCustomUnsigned(TinyGPSCustom &custom, uint16_t &value) {
+  if (!custom.isValid() || custom.age() > kGpsFreshAgeMs) {
+    return false;
   }
 
-  if (gpsGngsvSatellitesInView.isValid() &&
-      gpsGngsvSatellitesInView.age() <= kGpsFreshAgeMs) {
-    snprintf(buffer, bufferSize, "%u", atoi(gpsGngsvSatellitesInView.value()));
+  const char *text = custom.value();
+  if (text == nullptr || text[0] == '\0') {
+    return false;
+  }
+
+  char *end = nullptr;
+  const unsigned long parsed = strtoul(text, &end, 10);
+  if (end == text) {
+    return false;
+  }
+
+  value = static_cast<uint16_t>(min<unsigned long>(parsed, 0xFFFFUL));
+  return true;
+}
+
+bool addGpsSatellitesInView(TinyGPSCustom &custom, uint32_t &total) {
+  uint16_t value = 0;
+  if (!readGpsCustomUnsigned(custom, value)) {
+    return false;
+  }
+
+  total += value;
+  return true;
+}
+
+bool readGpsSatellitesInView(uint16_t &value) {
+  uint32_t total = 0;
+  bool hasConstellationSpecificView = false;
+
+  hasConstellationSpecificView |=
+      addGpsSatellitesInView(gpsGpgsvSatellitesInView, total);
+  hasConstellationSpecificView |=
+      addGpsSatellitesInView(gpsGlgsvSatellitesInView, total);
+  hasConstellationSpecificView |=
+      addGpsSatellitesInView(gpsGagsvSatellitesInView, total);
+  hasConstellationSpecificView |=
+      addGpsSatellitesInView(gpsGbgsvSatellitesInView, total);
+  hasConstellationSpecificView |=
+      addGpsSatellitesInView(gpsBdgsvSatellitesInView, total);
+  hasConstellationSpecificView |=
+      addGpsSatellitesInView(gpsQzgsvSatellitesInView, total);
+
+  if (hasConstellationSpecificView) {
+    value = static_cast<uint16_t>(min<uint32_t>(total, 0xFFFFUL));
+    return true;
+  }
+
+  return readGpsCustomUnsigned(gpsGngsvSatellitesInView, value);
+}
+
+void formatGpsSatellitesInView(char *buffer, size_t bufferSize) {
+  uint16_t satellitesInView = 0;
+  if (readGpsSatellitesInView(satellitesInView)) {
+    snprintf(buffer, bufferSize, "%u", satellitesInView);
     return;
   }
 
@@ -1995,7 +2561,8 @@ bool shouldSendPid(uint32_t pid) {
          (pid == kThrottlePositionPid && throttlePositionPidAllowed) ||
          (pid == kBatteryVoltagePid && batteryVoltagePidAllowed) ||
          (pid == kEngineRpmPid && engineRpmPidAllowed) ||
-         (pid == kAfrPid && afrPidAllowed);
+         (pid == kAfrPid && afrPidAllowed) ||
+         (pid == kGpsSatellitesInViewPid && gpsSatellitesInViewPidAllowed);
 }
 
 bool publishCanValue(uint32_t pid, uint16_t rawValue) {
@@ -2011,6 +2578,22 @@ bool publishCanValue(uint32_t pid, uint16_t rawValue) {
   canMainCharacteristic->setValue(packet, sizeof(packet));
   canMainCharacteristic->notify();
   return true;
+}
+
+void publishGpsSatellitesInView(uint32_t now) {
+  if (now - lastGpsSatellitesInViewNotifyMs <
+      kGpsSatellitesInViewNotifyIntervalMs) {
+    return;
+  }
+
+  uint16_t satellitesInView = 0;
+  if (!readGpsSatellitesInView(satellitesInView)) {
+    return;
+  }
+
+  if (publishCanValue(kGpsSatellitesInViewPid, satellitesInView)) {
+    lastGpsSatellitesInViewNotifyMs = now;
+  }
 }
 
 void publishTelemetry(float pressureBar,
@@ -2032,15 +2615,20 @@ void publishTelemetry(float pressureBar,
   publishCanValue(kAfrPid, afrCentivalue);
 
   const uint32_t now = millis();
+  publishGpsSatellitesInView(now);
+
   if (now - lastBleTxLogMs >= kBleTxLogIntervalMs) {
     lastBleTxLogMs = now;
+    char satellitesInViewText[8] = {};
+    formatGpsSatellitesInView(satellitesInViewText, sizeof(satellitesInViewText));
     Serial.printf(
-        "BLE TX brake=%5.1f bar, throttle=%5.1f%%, battery=%6.3fV, rpm=%5.0f, AFR=%5.2f\n",
+        "BLE TX brake=%5.1f bar, throttle=%5.1f%%, battery=%6.3fV, rpm=%5.0f, AFR=%5.2f, view=%s\n",
         pressureBar,
         throttlePercent,
         batteryVolts,
         rpm,
-        afr);
+        afr,
+        satellitesInViewText);
   }
 }
 
@@ -2072,6 +2660,7 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
       batteryVoltagePidAllowed = false;
       engineRpmPidAllowed = false;
       afrPidAllowed = false;
+      gpsSatellitesInViewPidAllowed = false;
       Serial.println("RaceChrono filter: deny all PIDs");
       return;
     }
@@ -2083,6 +2672,7 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
       batteryVoltagePidAllowed = true;
       engineRpmPidAllowed = true;
       afrPidAllowed = true;
+      gpsSatellitesInViewPidAllowed = true;
       notifyIntervalMs = max<uint16_t>(1, readUint16Be(data + 1));
       Serial.printf("RaceChrono filter: allow all PIDs, interval=%u ms\n", notifyIntervalMs);
       return;
@@ -2095,7 +2685,8 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
                             pid == kThrottlePositionPid ||
                             pid == kBatteryVoltagePid ||
                             pid == kEngineRpmPid ||
-                            pid == kAfrPid;
+                            pid == kAfrPid ||
+                            pid == kGpsSatellitesInViewPid;
       if (pid == kBrakePressurePid) {
         brakePressurePidAllowed = true;
       } else if (pid == kThrottlePositionPid) {
@@ -2106,6 +2697,8 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
         engineRpmPidAllowed = true;
       } else if (pid == kAfrPid) {
         afrPidAllowed = true;
+      } else if (pid == kGpsSatellitesInViewPid) {
+        gpsSatellitesInViewPidAllowed = true;
       }
       if (knownPid) {
         notifyIntervalMs = interval;
@@ -2182,9 +2775,12 @@ void setup() {
                 static_cast<unsigned long>(kEngineRpmPid));
   Serial.printf("RaceChrono BLE CAN PID 0x%08lX: AFR, centi-AFR\n",
                 static_cast<unsigned long>(kAfrPid));
+  Serial.printf("RaceChrono BLE CAN PID 0x%08lX: GPS satellites in view, count\n",
+                static_cast<unsigned long>(kGpsSatellitesInViewPid));
   Serial.printf("RaceChrono BLE GPS: native GPS feature on characteristics 0x0003/0x0004\n");
 
   loadThrottleCalibration();
+  loadGpsConfigState();
   startGps();
   startBatteryAdc();
   startTachInput();
