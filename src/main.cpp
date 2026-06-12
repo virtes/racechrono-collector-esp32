@@ -25,6 +25,8 @@ constexpr uint32_t kEngineRpmPid = 0x00000104;
 constexpr uint32_t kAfrPid = 0x00000105;
 constexpr uint32_t kGpsSatellitesInViewPid = 0x00000106;
 constexpr uint16_t kDefaultNotifyIntervalMs = 20;
+constexpr uint16_t kMinNotifyIntervalMs = 1;
+constexpr uint16_t kBleReconnectQuietMs = 750;
 constexpr uint16_t kGpsSatellitesInViewNotifyIntervalMs = 1000;
 constexpr uint16_t kBleTxLogIntervalMs = 30000;
 constexpr uint16_t kMaxBrakePressureBar = 250;
@@ -165,6 +167,9 @@ BLEServer *bleServer = nullptr;
 BLECharacteristic *canMainCharacteristic = nullptr;
 BLECharacteristic *gpsMainCharacteristic = nullptr;
 BLECharacteristic *gpsTimeCharacteristic = nullptr;
+BLE2902 *canMainNotifyDescriptor = nullptr;
+BLE2902 *gpsMainNotifyDescriptor = nullptr;
+BLE2902 *gpsTimeNotifyDescriptor = nullptr;
 Preferences throttleCalibrationPrefs;
 Preferences gpsConfigPrefs;
 Adafruit_SSD1306 display(kDisplayWidth,
@@ -192,6 +197,7 @@ bool engineRpmPidAllowed = true;
 bool afrPidAllowed = true;
 bool gpsSatellitesInViewPidAllowed = true;
 uint16_t notifyIntervalMs = kDefaultNotifyIntervalMs;
+uint32_t bleConnectedAtMs = 0;
 uint32_t lastCanNotifyMs = 0;
 uint32_t lastGpsSatellitesInViewNotifyMs = 0;
 uint32_t lastBleTxLogMs = 0;
@@ -2401,6 +2407,13 @@ void buildGpsTimePacket(uint8_t *packet) {
   writeUint24Be(packet, syncDateHour);
 }
 
+bool canSendBleNotification(BLE2902 *descriptor) {
+  return bleClientConnected &&
+         descriptor != nullptr &&
+         descriptor->getNotifications() &&
+         millis() - bleConnectedAtMs >= kBleReconnectQuietMs;
+}
+
 void updateGpsCharacteristicValues(bool notify) {
   syncGpsDateHourValue();
 
@@ -2408,7 +2421,7 @@ void updateGpsCharacteristicValues(bool notify) {
     uint8_t packet[3] = {};
     buildGpsTimePacket(packet);
     gpsTimeCharacteristic->setValue(packet, sizeof(packet));
-    if (notify && bleClientConnected) {
+    if (notify && canSendBleNotification(gpsTimeNotifyDescriptor)) {
       gpsTimeCharacteristic->notify();
     }
     gpsTimeDirty = false;
@@ -2418,7 +2431,7 @@ void updateGpsCharacteristicValues(bool notify) {
     uint8_t packet[20] = {};
     buildGpsMainPacket(packet);
     gpsMainCharacteristic->setValue(packet, sizeof(packet));
-    if (notify && bleClientConnected) {
+    if (notify && canSendBleNotification(gpsMainNotifyDescriptor)) {
       gpsMainCharacteristic->notify();
     }
     gpsMainDirty = false;
@@ -2566,7 +2579,8 @@ bool shouldSendPid(uint32_t pid) {
 }
 
 bool publishCanValue(uint32_t pid, uint16_t rawValue) {
-  if (!bleClientConnected || canMainCharacteristic == nullptr ||
+  if (!canSendBleNotification(canMainNotifyDescriptor) ||
+      canMainCharacteristic == nullptr ||
       !shouldSendPid(pid)) {
     return false;
   }
@@ -2578,6 +2592,22 @@ bool publishCanValue(uint32_t pid, uint16_t rawValue) {
   canMainCharacteristic->setValue(packet, sizeof(packet));
   canMainCharacteristic->notify();
   return true;
+}
+
+uint16_t normalizeNotifyInterval(uint16_t requestedIntervalMs) {
+  return max<uint16_t>(kMinNotifyIntervalMs, requestedIntervalMs);
+}
+
+void setBleNotificationDescriptors(bool enabled) {
+  if (canMainNotifyDescriptor != nullptr) {
+    canMainNotifyDescriptor->setNotifications(enabled);
+  }
+  if (gpsMainNotifyDescriptor != nullptr) {
+    gpsMainNotifyDescriptor->setNotifications(enabled);
+  }
+  if (gpsTimeNotifyDescriptor != nullptr) {
+    gpsTimeNotifyDescriptor->setNotifications(enabled);
+  }
 }
 
 void publishGpsSatellitesInView(uint32_t now) {
@@ -2635,10 +2665,13 @@ void publishTelemetry(float pressureBar,
 class RaceChronoServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *) override {
     bleClientConnected = true;
+    bleConnectedAtMs = millis();
+    lastCanNotifyMs = bleConnectedAtMs;
   }
 
   void onDisconnect(BLEServer *) override {
     bleClientConnected = false;
+    setBleNotificationDescriptors(false);
   }
 };
 
@@ -2673,13 +2706,18 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
       engineRpmPidAllowed = true;
       afrPidAllowed = true;
       gpsSatellitesInViewPidAllowed = true;
-      notifyIntervalMs = max<uint16_t>(1, readUint16Be(data + 1));
-      Serial.printf("RaceChrono filter: allow all PIDs, interval=%u ms\n", notifyIntervalMs);
+      const uint16_t requestedIntervalMs = readUint16Be(data + 1);
+      notifyIntervalMs = normalizeNotifyInterval(requestedIntervalMs);
+      Serial.printf(
+          "RaceChrono filter: allow all PIDs, interval=%u ms%s\n",
+          notifyIntervalMs,
+          requestedIntervalMs == notifyIntervalMs ? "" : " (clamped)");
       return;
     }
 
     if (commandId == 2 && length >= 7) {
-      const uint16_t interval = max<uint16_t>(1, readUint16Be(data + 1));
+      const uint16_t requestedIntervalMs = readUint16Be(data + 1);
+      const uint16_t interval = normalizeNotifyInterval(requestedIntervalMs);
       const uint32_t pid = readUint32Be(data + 3);
       const bool knownPid = pid == kBrakePressurePid ||
                             pid == kThrottlePositionPid ||
@@ -2707,7 +2745,8 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
           "RaceChrono filter: allow PID=0x%08lX, interval=%u ms%s\n",
           static_cast<unsigned long>(pid),
           interval,
-          knownPid ? "" : " (ignored)");
+          knownPid ? (requestedIntervalMs == interval ? "" : " (clamped)") :
+                     " (ignored)");
     }
   }
 };
@@ -2722,7 +2761,8 @@ void startRaceChronoBle() {
   canMainCharacteristic = raceChronoService->createCharacteristic(
       kCanMainCharacteristicUuid,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  canMainCharacteristic->addDescriptor(new BLE2902());
+  canMainNotifyDescriptor = new BLE2902();
+  canMainCharacteristic->addDescriptor(canMainNotifyDescriptor);
 
   BLECharacteristic *canFilterCharacteristic = raceChronoService->createCharacteristic(
       kCanFilterCharacteristicUuid,
@@ -2732,12 +2772,14 @@ void startRaceChronoBle() {
   gpsMainCharacteristic = raceChronoService->createCharacteristic(
       kGpsMainCharacteristicUuid,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  gpsMainCharacteristic->addDescriptor(new BLE2902());
+  gpsMainNotifyDescriptor = new BLE2902();
+  gpsMainCharacteristic->addDescriptor(gpsMainNotifyDescriptor);
 
   gpsTimeCharacteristic = raceChronoService->createCharacteristic(
       kGpsTimeCharacteristicUuid,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  gpsTimeCharacteristic->addDescriptor(new BLE2902());
+  gpsTimeNotifyDescriptor = new BLE2902();
+  gpsTimeCharacteristic->addDescriptor(gpsTimeNotifyDescriptor);
 
   uint8_t initialPacket[8] = {};
   writeUint32Le(initialPacket, kBrakePressurePid);
