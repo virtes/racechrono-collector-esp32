@@ -67,6 +67,7 @@ constexpr uint16_t kAfrAdcReadIntervalMs = 20;
 constexpr uint8_t kBatteryAdcPin = 35;
 constexpr uint8_t kBatteryAdcResolutionBits = 12;
 constexpr uint16_t kBatteryAdcReadIntervalMs = 1000;
+constexpr uint16_t kBatteryVoltageNotifyIntervalMs = 1000;
 constexpr uint8_t kBatteryAdcSampleCount = 8;
 constexpr uint8_t kGpsRxPin = 16;
 constexpr uint8_t kGpsTxPin = 17;
@@ -185,6 +186,7 @@ uint32_t lastDisplayUpdateMs = 0;
 uint32_t lastThrottleAdcReadMs = 0;
 uint32_t lastBrakePressureAdcReadMs = 0;
 uint32_t lastBatteryAdcReadMs = 0;
+uint32_t lastBatteryVoltageNotifyMs = 0;
 uint32_t lastAfrAdcReadMs = 0;
 uint32_t lastGpsDebugLogMs = 0;
 uint32_t lastGpsDebugCharsProcessed = 0;
@@ -2298,23 +2300,28 @@ void setBleNotificationDescriptors(bool enabled) {
   }
 }
 
-void publishTelemetry(float pressureBar,
-                      float throttlePercent,
-                      float batteryVolts,
-                      float afr) {
+void publishFastTelemetry(float pressureBar,
+                          float throttlePercent,
+                          float afr) {
   const uint16_t pressureCentibar = pressureBarToCentibar(pressureBar);
   const uint16_t throttleCentipercent =
       static_cast<uint16_t>(lroundf(constrain(throttlePercent, 0.0F, 100.0F) * 100.0F));
-  const uint16_t batteryMillivolts = voltsToMillivolts(batteryVolts);
   const uint16_t afrCentivalue = afrToCentiAfr(afr);
 
   publishCanValue(kBrakePressurePid, pressureCentibar);
   publishCanValue(kThrottlePositionPid, throttleCentipercent);
-  publishCanValue(kBatteryVoltagePid, batteryMillivolts);
   publishCanValue(kAfrPid, afrCentivalue);
+}
 
-  const uint32_t now = millis();
+void publishBatteryVoltage(float batteryVolts) {
+  publishCanValue(kBatteryVoltagePid, voltsToMillivolts(batteryVolts));
+}
 
+void printBleTxLog(uint32_t now,
+                   float pressureBar,
+                   float throttlePercent,
+                   float batteryVolts,
+                   float afr) {
   if (now - lastBleTxLogMs >= kBleTxLogIntervalMs) {
     lastBleTxLogMs = now;
     Serial.printf(
@@ -2331,6 +2338,8 @@ class RaceChronoServerCallbacks : public BLEServerCallbacks {
     bleClientConnected = true;
     bleConnectedAtMs = millis();
     lastCanNotifyMs = bleConnectedAtMs;
+    lastBatteryVoltageNotifyMs =
+        bleConnectedAtMs - kBatteryVoltageNotifyIntervalMs;
   }
 
   void onDisconnect(BLEServer *) override {
@@ -2493,9 +2502,24 @@ void loop() {
   updateLedIdleBlink(now);
   updateDisplay(now);
 
-  if (bleClientConnected && now - lastCanNotifyMs >= notifyIntervalMs) {
-    lastCanNotifyMs = now;
-    publishTelemetry(brakePressureBar, throttlePercent, batteryVolts, afr);
+  if (canSendBleNotification(canMainNotifyDescriptor)) {
+    bool canTelemetryPublished = false;
+
+    if (now - lastCanNotifyMs >= notifyIntervalMs) {
+      lastCanNotifyMs = now;
+      publishFastTelemetry(brakePressureBar, throttlePercent, afr);
+      canTelemetryPublished = true;
+    }
+
+    if (now - lastBatteryVoltageNotifyMs >= kBatteryVoltageNotifyIntervalMs) {
+      lastBatteryVoltageNotifyMs = now;
+      publishBatteryVoltage(batteryVolts);
+      canTelemetryPublished = true;
+    }
+
+    if (canTelemetryPublished) {
+      printBleTxLog(now, brakePressureBar, throttlePercent, batteryVolts, afr);
+    }
   }
 
   printAdcReadings(now);
