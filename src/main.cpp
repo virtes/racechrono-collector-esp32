@@ -21,13 +21,10 @@ constexpr char kGpsTimeCharacteristicUuid[] = "00000004-0000-1000-8000-00805f9b3
 constexpr uint32_t kBrakePressurePid = 0x00000101;
 constexpr uint32_t kThrottlePositionPid = 0x00000102;
 constexpr uint32_t kBatteryVoltagePid = 0x00000103;
-constexpr uint32_t kEngineRpmPid = 0x00000104;
 constexpr uint32_t kAfrPid = 0x00000105;
-constexpr uint32_t kGpsSatellitesInViewPid = 0x00000106;
 constexpr uint16_t kDefaultNotifyIntervalMs = 20;
 constexpr uint16_t kMinNotifyIntervalMs = 1;
 constexpr uint16_t kBleReconnectQuietMs = 750;
-constexpr uint16_t kGpsSatellitesInViewNotifyIntervalMs = 1000;
 constexpr uint16_t kBleTxLogIntervalMs = 30000;
 constexpr uint16_t kMaxBrakePressureBar = 250;
 constexpr uint8_t kLedPin = 5;
@@ -71,17 +68,6 @@ constexpr uint8_t kBatteryAdcPin = 35;
 constexpr uint8_t kBatteryAdcResolutionBits = 12;
 constexpr uint16_t kBatteryAdcReadIntervalMs = 1000;
 constexpr uint8_t kBatteryAdcSampleCount = 8;
-constexpr uint8_t kTachInputPin = 27;
-constexpr float kIgnitionPulsesPerRevolution = 1.0F;
-constexpr uint16_t kTachMinPulseIntervalUs = 1000;
-constexpr uint16_t kTachSignalTimeoutMs = 1000;
-constexpr uint8_t kTachPeriodSampleCount = 3;
-constexpr uint16_t kTachCountWindowMs = 200;
-constexpr uint8_t kTachCountWindowMinPulses = 4;
-constexpr float kTachCountWindowMinRpm = 1800.0F;
-constexpr float kTachWindowBlend = 0.35F;
-constexpr float kEngineRpmRiseFilterAlpha = 0.35F;
-constexpr float kEngineRpmFallFilterAlpha = 0.75F;
 constexpr uint8_t kGpsRxPin = 16;
 constexpr uint8_t kGpsTxPin = 17;
 constexpr uint32_t kGpsBaudRates[] = {115200, 9600, 38400, 57600, 4800};
@@ -90,7 +76,7 @@ constexpr uint8_t kGpsBaudRateCount =
 constexpr uint32_t kGpsTargetBaudRate = 115200;
 constexpr uint32_t kGpsInitialBaudRate = kGpsTargetBaudRate;
 constexpr uint16_t kGpsFreshAgeMs = 2500;
-constexpr uint16_t kGpsDebugLogIntervalMs = 2000;
+constexpr uint16_t kGpsDebugLogIntervalMs = 30000;
 constexpr uint16_t kGpsBaudProbeIntervalMs = 6000;
 constexpr uint8_t kGpsDebugRawSampleSize = 96;
 constexpr uint8_t kGpsDebugHexSampleByteCount = 32;
@@ -101,7 +87,7 @@ constexpr uint16_t kThrottleOpenCalibrationMs = 2000;
 constexpr uint16_t kThrottleCalibrationSampleIntervalMs = 20;
 constexpr float kDefaultThrottleZeroVolts = 0.95F;
 constexpr float kDefaultThrottleFullVolts = 2.4F;
-constexpr float kMaxThrottleZeroCalibrationVolts = 1.2F;
+constexpr float kMaxThrottleZeroCalibrationVolts = 1.3F;
 constexpr float kMinThrottleFullCalibrationVolts = 1.5F;
 constexpr float kMaxThrottleCalibrationDeltaVolts = 0.1F;
 constexpr float kThrottleAdcFilterAlpha = 0.3F;
@@ -179,13 +165,6 @@ Adafruit_SSD1306 display(kDisplayWidth,
 HardwareSerial gpsSerial(2);
 TinyGPSPlus gps;
 TinyGPSCustom gpsGgaFixQuality(gps, "GPGGA", 6);
-TinyGPSCustom gpsGpgsvSatellitesInView(gps, "GPGSV", 3);
-TinyGPSCustom gpsGlgsvSatellitesInView(gps, "GLGSV", 3);
-TinyGPSCustom gpsGagsvSatellitesInView(gps, "GAGSV", 3);
-TinyGPSCustom gpsGbgsvSatellitesInView(gps, "GBGSV", 3);
-TinyGPSCustom gpsBdgsvSatellitesInView(gps, "BDGSV", 3);
-TinyGPSCustom gpsQzgsvSatellitesInView(gps, "QZGSV", 3);
-TinyGPSCustom gpsGngsvSatellitesInView(gps, "GNGSV", 3);
 
 bool bleClientConnected = false;
 bool bleWasConnected = false;
@@ -193,13 +172,10 @@ bool allowAllPids = true;
 bool brakePressurePidAllowed = true;
 bool throttlePositionPidAllowed = true;
 bool batteryVoltagePidAllowed = true;
-bool engineRpmPidAllowed = true;
 bool afrPidAllowed = true;
-bool gpsSatellitesInViewPidAllowed = true;
 uint16_t notifyIntervalMs = kDefaultNotifyIntervalMs;
 uint32_t bleConnectedAtMs = 0;
 uint32_t lastCanNotifyMs = 0;
-uint32_t lastGpsSatellitesInViewNotifyMs = 0;
 uint32_t lastBleTxLogMs = 0;
 uint32_t lastLedToggleMs = 0;
 uint32_t lastLedIdleBlinkMs = 0;
@@ -262,20 +238,6 @@ float batteryMeasuredVolts = 0.0F;
 float batteryVolts = 0.0F;
 bool batteryAdcValid = false;
 bool batteryFilterInitialized = false;
-volatile uint32_t tachLastPulseUs = 0;
-volatile uint32_t tachPulseIntervalUs = 0;
-volatile uint32_t tachPulseCount = 0;
-volatile uint32_t tachPulseIntervalsUs[kTachPeriodSampleCount] = {};
-volatile uint8_t tachPulseIntervalIndex = 0;
-volatile uint8_t tachPulseIntervalSamples = 0;
-float engineRpm = 0.0F;
-bool engineRpmValid = false;
-bool engineRpmFilterInitialized = false;
-uint32_t lastTachPulseCount = 0;
-uint32_t lastTachWindowPulseCount = 0;
-uint32_t lastTachWindowUs = 0;
-float tachWindowRpm = 0.0F;
-bool tachWindowRpmValid = false;
 bool ledOn = false;
 bool ledIdleBlinkOn = false;
 bool ledIdleConnected = false;
@@ -290,31 +252,6 @@ bool gpsSpeedWasFresh = false;
 bool gpsCourseWasFresh = false;
 bool gpsTimeWasFresh = false;
 bool gpsDateWasFresh = false;
-
-void IRAM_ATTR handleTachPulse() {
-  const uint32_t nowUs = micros();
-  const uint32_t previousPulseUs = tachLastPulseUs;
-
-  if (previousPulseUs == 0) {
-    tachLastPulseUs = nowUs;
-    return;
-  }
-
-  const uint32_t intervalUs = nowUs - previousPulseUs;
-  if (intervalUs < kTachMinPulseIntervalUs) {
-    return;
-  }
-
-  tachLastPulseUs = nowUs;
-  tachPulseIntervalUs = intervalUs;
-  tachPulseIntervalsUs[tachPulseIntervalIndex] = intervalUs;
-  tachPulseIntervalIndex =
-      (tachPulseIntervalIndex + 1) % kTachPeriodSampleCount;
-  if (tachPulseIntervalSamples < kTachPeriodSampleCount) {
-    ++tachPulseIntervalSamples;
-  }
-  ++tachPulseCount;
-}
 
 uint16_t readUint16Be(const uint8_t *data) {
   return (static_cast<uint16_t>(data[0]) << 8) | data[1];
@@ -591,32 +528,6 @@ void invalidateBatteryAdc() {
   batteryVolts = 0.0F;
 }
 
-void invalidateEngineRpm() {
-  engineRpmValid = false;
-  engineRpmFilterInitialized = false;
-  engineRpm = 0.0F;
-  tachWindowRpmValid = false;
-  tachWindowRpm = 0.0F;
-}
-
-void resetTachPulseState() {
-  uint32_t pulseCount = 0;
-
-  noInterrupts();
-  tachLastPulseUs = 0;
-  tachPulseIntervalUs = 0;
-  tachPulseIntervalIndex = 0;
-  tachPulseIntervalSamples = 0;
-  pulseCount = tachPulseCount;
-  interrupts();
-
-  lastTachPulseCount = pulseCount;
-  lastTachWindowPulseCount = pulseCount;
-  lastTachWindowUs = micros();
-  tachWindowRpmValid = false;
-  tachWindowRpm = 0.0F;
-}
-
 void invalidateAds1115Measurements() {
   for (uint8_t channel = 0; channel < 4; ++channel) {
     ads1115AdcRaw[channel] = 0;
@@ -650,75 +561,6 @@ float updateBatteryFilteredVolts(float volts) {
 
   batteryVolts += kBatteryAdcFilterAlpha * (volts - batteryVolts);
   return batteryVolts;
-}
-
-float tachIntervalUsToRpm(uint32_t intervalUs) {
-  if (intervalUs == 0) {
-    return 0.0F;
-  }
-
-  const float pulseHz = 1000000.0F / static_cast<float>(intervalUs);
-  return pulseHz * 60.0F / kIgnitionPulsesPerRevolution;
-}
-
-float tachPulseWindowToRpm(uint32_t pulseCount, uint32_t elapsedUs) {
-  if (pulseCount == 0 || elapsedUs == 0) {
-    return 0.0F;
-  }
-
-  const float pulseHz =
-      static_cast<float>(pulseCount) * 1000000.0F / static_cast<float>(elapsedUs);
-  return pulseHz * 60.0F / kIgnitionPulsesPerRevolution;
-}
-
-uint32_t medianTachIntervalUs(uint32_t *intervals, uint8_t count) {
-  for (uint8_t i = 1; i < count; ++i) {
-    const uint32_t value = intervals[i];
-    uint8_t j = i;
-    while (j > 0 && intervals[j - 1] > value) {
-      intervals[j] = intervals[j - 1];
-      --j;
-    }
-    intervals[j] = value;
-  }
-
-  if (count == 0) {
-    return 0;
-  }
-  if ((count % 2) == 1) {
-    return intervals[count / 2];
-  }
-
-  return (intervals[count / 2 - 1] + intervals[count / 2]) / 2;
-}
-
-float updateEngineRpmFiltered(float rpm) {
-  if (!engineRpmFilterInitialized) {
-    engineRpm = rpm;
-    engineRpmFilterInitialized = true;
-    return engineRpm;
-  }
-
-  const float alpha =
-      rpm < engineRpm ? kEngineRpmFallFilterAlpha : kEngineRpmRiseFilterAlpha;
-  engineRpm += alpha * (rpm - engineRpm);
-  return engineRpm;
-}
-
-void limitEngineRpmByPulseAge(uint32_t nowUs, uint32_t lastPulseUs) {
-  if (!engineRpmValid || lastPulseUs == 0) {
-    return;
-  }
-
-  const uint32_t pulseAgeUs = nowUs - lastPulseUs;
-  if (pulseAgeUs == 0) {
-    return;
-  }
-
-  const float maxPossibleRpm = tachIntervalUsToRpm(pulseAgeUs);
-  if (engineRpm > maxPossibleRpm) {
-    engineRpm = maxPossibleRpm;
-  }
 }
 
 float updateBrakePressureFilteredBar(float pressureBar) {
@@ -770,76 +612,6 @@ void updateBatteryAdcState(int16_t rawValue, float volts) {
   batteryMeasuredVolts = adcVoltsToBatteryVolts(volts);
   updateBatteryFilteredVolts(batteryMeasuredVolts);
   batteryAdcValid = true;
-}
-
-void updateEngineRpm(uint32_t) {
-  uint32_t pulseIntervalUs = 0;
-  uint32_t pulseCount = 0;
-  uint32_t lastPulseUs = 0;
-  uint32_t pulseIntervalsUs[kTachPeriodSampleCount] = {};
-  uint8_t pulseIntervalSamples = 0;
-
-  noInterrupts();
-  pulseIntervalUs = tachPulseIntervalUs;
-  pulseCount = tachPulseCount;
-  lastPulseUs = tachLastPulseUs;
-  pulseIntervalSamples = tachPulseIntervalSamples;
-  for (uint8_t i = 0; i < pulseIntervalSamples; ++i) {
-    pulseIntervalsUs[i] = tachPulseIntervalsUs[i];
-  }
-  interrupts();
-
-  const uint32_t nowUs = micros();
-  if (lastPulseUs == 0 ||
-      nowUs - lastPulseUs >
-          static_cast<uint32_t>(kTachSignalTimeoutMs) * 1000UL) {
-    if (lastPulseUs != 0 || pulseIntervalUs != 0) {
-      resetTachPulseState();
-    }
-    invalidateEngineRpm();
-    return;
-  }
-
-  limitEngineRpmByPulseAge(nowUs, lastPulseUs);
-
-  if (lastTachWindowUs == 0) {
-    lastTachWindowUs = nowUs;
-    lastTachWindowPulseCount = pulseCount;
-  }
-
-  const uint32_t windowElapsedUs = nowUs - lastTachWindowUs;
-  if (windowElapsedUs >= static_cast<uint32_t>(kTachCountWindowMs) * 1000UL) {
-    const uint32_t windowPulseCount = pulseCount - lastTachWindowPulseCount;
-    if (windowPulseCount >= kTachCountWindowMinPulses) {
-      tachWindowRpm = tachPulseWindowToRpm(windowPulseCount, windowElapsedUs);
-      tachWindowRpmValid = true;
-    } else {
-      tachWindowRpmValid = false;
-      tachWindowRpm = 0.0F;
-    }
-
-    lastTachWindowPulseCount = pulseCount;
-    lastTachWindowUs = nowUs;
-  }
-
-  if (pulseCount == lastTachPulseCount || pulseIntervalUs == 0) {
-    return;
-  }
-
-  lastTachPulseCount = pulseCount;
-  uint32_t periodIntervalUs = pulseIntervalUs;
-  if (pulseIntervalSamples > 0) {
-    periodIntervalUs =
-        medianTachIntervalUs(pulseIntervalsUs, pulseIntervalSamples);
-  }
-
-  float rpm = tachIntervalUsToRpm(periodIntervalUs);
-  if (tachWindowRpmValid && rpm >= kTachCountWindowMinRpm) {
-    rpm = rpm * (1.0F - kTachWindowBlend) + tachWindowRpm * kTachWindowBlend;
-  }
-
-  updateEngineRpmFiltered(rpm);
-  engineRpmValid = true;
 }
 
 void updateThrottleFromAdc(uint32_t now) {
@@ -1352,17 +1124,6 @@ void startBatteryAdc() {
       kBatteryAdcResolutionBits);
 }
 
-void startTachInput() {
-  pinMode(kTachInputPin, INPUT);
-  attachInterrupt(digitalPinToInterrupt(kTachInputPin), handleTachPulse, FALLING);
-
-  Serial.printf(
-      "Engine RPM input on ESP32 GPIO%u, falling edge, pulses/rev=%.2f, timeout=%u ms\n",
-      kTachInputPin,
-      kIgnitionPulsesPerRevolution,
-      kTachSignalTimeoutMs);
-}
-
 void writeGpsUbxByte(uint8_t value, uint8_t &checksumA, uint8_t &checksumB) {
   gpsSerial.write(value);
   checksumA += value;
@@ -1835,12 +1596,14 @@ void beginGpsSerial(uint32_t baudRate) {
   gpsSerial.begin(gpsCurrentBaudRate, SERIAL_8N1, kGpsRxPin, kGpsTxPin);
 }
 
-void configureGpsAtCurrentBaud(const char *reason) {
+void configureGpsAtCurrentBaud(const char *reason, bool logCommand = true) {
   sendGpsUbxSetUartNmea();
-  Serial.printf("GPS config: sent UBX-CFG-PRT at %lu baud, target NMEA %lu baud, output=NMEA (%s)\n",
-                static_cast<unsigned long>(gpsCurrentBaudRate),
-                static_cast<unsigned long>(kGpsTargetBaudRate),
-                reason);
+  if (logCommand) {
+    Serial.printf("GPS config: sent UBX-CFG-PRT at %lu baud, target NMEA %lu baud, output=NMEA (%s)\n",
+                  static_cast<unsigned long>(gpsCurrentBaudRate),
+                  static_cast<unsigned long>(kGpsTargetBaudRate),
+                  reason);
+  }
 
   if (gpsCurrentBaudRate != kGpsTargetBaudRate) {
     delay(50);
@@ -1853,13 +1616,13 @@ void configureGpsAtCommonBaudRates(const char *reason) {
     beginGpsSerial(kGpsBaudRates[i]);
     delay(50);
     sendGpsUbxSetUartNmea();
-    Serial.printf("GPS config: sent UBX-CFG-PRT at %lu baud, target NMEA %lu baud, output=NMEA (%s)\n",
-                  static_cast<unsigned long>(gpsCurrentBaudRate),
-                  static_cast<unsigned long>(kGpsTargetBaudRate),
-                  reason);
   }
 
   beginGpsSerial(kGpsTargetBaudRate);
+  Serial.printf("GPS config: sent UBX-CFG-PRT at %u common baud rates, target NMEA %lu baud, output=NMEA (%s)\n",
+                kGpsBaudRateCount,
+                static_cast<unsigned long>(kGpsTargetBaudRate),
+                reason);
 }
 
 void enableGpsUbxOutputForDiagnostics() {
@@ -2015,11 +1778,6 @@ uint16_t voltsToMillivolts(float volts) {
   return static_cast<uint16_t>(lroundf(volts * 1000.0F));
 }
 
-uint16_t rpmToUint16(float rpm) {
-  rpm = constrain(rpm, 0.0F, 65535.0F);
-  return static_cast<uint16_t>(lroundf(rpm));
-}
-
 uint16_t afrToCentiAfr(float afr) {
   afr = constrain(afr, kAfrAtZeroVolts, kAfrCalibrationHigh);
   return static_cast<uint16_t>(lroundf(afr * 100.0F));
@@ -2059,71 +1817,6 @@ void formatGpsUnsigned(char *buffer,
   }
 
   snprintf(buffer, bufferSize, "%lu", static_cast<unsigned long>(value));
-}
-
-bool readGpsCustomUnsigned(TinyGPSCustom &custom, uint16_t &value) {
-  if (!custom.isValid() || custom.age() > kGpsFreshAgeMs) {
-    return false;
-  }
-
-  const char *text = custom.value();
-  if (text == nullptr || text[0] == '\0') {
-    return false;
-  }
-
-  char *end = nullptr;
-  const unsigned long parsed = strtoul(text, &end, 10);
-  if (end == text) {
-    return false;
-  }
-
-  value = static_cast<uint16_t>(min<unsigned long>(parsed, 0xFFFFUL));
-  return true;
-}
-
-bool addGpsSatellitesInView(TinyGPSCustom &custom, uint32_t &total) {
-  uint16_t value = 0;
-  if (!readGpsCustomUnsigned(custom, value)) {
-    return false;
-  }
-
-  total += value;
-  return true;
-}
-
-bool readGpsSatellitesInView(uint16_t &value) {
-  uint32_t total = 0;
-  bool hasConstellationSpecificView = false;
-
-  hasConstellationSpecificView |=
-      addGpsSatellitesInView(gpsGpgsvSatellitesInView, total);
-  hasConstellationSpecificView |=
-      addGpsSatellitesInView(gpsGlgsvSatellitesInView, total);
-  hasConstellationSpecificView |=
-      addGpsSatellitesInView(gpsGagsvSatellitesInView, total);
-  hasConstellationSpecificView |=
-      addGpsSatellitesInView(gpsGbgsvSatellitesInView, total);
-  hasConstellationSpecificView |=
-      addGpsSatellitesInView(gpsBdgsvSatellitesInView, total);
-  hasConstellationSpecificView |=
-      addGpsSatellitesInView(gpsQzgsvSatellitesInView, total);
-
-  if (hasConstellationSpecificView) {
-    value = static_cast<uint16_t>(min<uint32_t>(total, 0xFFFFUL));
-    return true;
-  }
-
-  return readGpsCustomUnsigned(gpsGngsvSatellitesInView, value);
-}
-
-void formatGpsSatellitesInView(char *buffer, size_t bufferSize) {
-  uint16_t satellitesInView = 0;
-  if (readGpsSatellitesInView(satellitesInView)) {
-    snprintf(buffer, bufferSize, "%u", satellitesInView);
-    return;
-  }
-
-  snprintf(buffer, bufferSize, "--");
 }
 
 void formatGpsFloat(char *buffer,
@@ -2226,7 +1919,7 @@ void updateGpsBaudProbe(uint32_t now) {
   const uint32_t probeBaudRate = kGpsBaudRates[gpsCurrentBaudRateIndex];
   beginGpsSerial(probeBaudRate);
   delay(50);
-  configureGpsAtCurrentBaud("baud probe");
+  configureGpsAtCurrentBaud("baud probe", false);
   gpsCurrentBaudRateIndex =
       (gpsCurrentBaudRateIndex + 1) % kGpsBaudRateCount;
 }
@@ -2464,7 +2157,6 @@ void printGpsDebugLog(uint32_t now) {
   lastGpsDebugSentencesWithFix = sentencesWithFix;
 
   char satellites[8] = {};
-  char satellitesInView[8] = {};
   char hdop[8] = {};
   char latitude[16] = {};
   char longitude[16] = {};
@@ -2474,7 +2166,6 @@ void printGpsDebugLog(uint32_t now) {
                     sizeof(satellites),
                     gps.satellites.isValid(),
                     gps.satellites.value());
-  formatGpsSatellitesInView(satellitesInView, sizeof(satellitesInView));
   formatGpsFloat(hdop,
                  sizeof(hdop),
                  gps.hdop.isValid(),
@@ -2505,14 +2196,13 @@ void printGpsDebugLog(uint32_t now) {
       gpsDebugState(charsDelta, passedDelta, failedDelta, ubxHeaderCount);
   if (passedChecksum > 0) {
     Serial.printf(
-        "GPS diag state=%s baud=%lu ok=%lu (+%lu), fix_sent=%lu (+%lu), view=%s, used=%s, hdop=%s, lat=%s, lon=%s, speed=%s km/h, course=%s deg\n",
+        "GPS diag state=%s baud=%lu ok=%lu (+%lu), fix_sent=%lu (+%lu), used=%s, hdop=%s, lat=%s, lon=%s, speed=%s km/h, course=%s deg\n",
         state,
         static_cast<unsigned long>(gpsCurrentBaudRate),
         static_cast<unsigned long>(passedChecksum),
         static_cast<unsigned long>(passedDelta),
         static_cast<unsigned long>(sentencesWithFix),
         static_cast<unsigned long>(fixDelta),
-        satellitesInView,
         satellites,
         hdop,
         latitude,
@@ -2573,9 +2263,7 @@ bool shouldSendPid(uint32_t pid) {
          (pid == kBrakePressurePid && brakePressurePidAllowed) ||
          (pid == kThrottlePositionPid && throttlePositionPidAllowed) ||
          (pid == kBatteryVoltagePid && batteryVoltagePidAllowed) ||
-         (pid == kEngineRpmPid && engineRpmPidAllowed) ||
-         (pid == kAfrPid && afrPidAllowed) ||
-         (pid == kGpsSatellitesInViewPid && gpsSatellitesInViewPidAllowed);
+         (pid == kAfrPid && afrPidAllowed);
 }
 
 bool publishCanValue(uint32_t pid, uint16_t rawValue) {
@@ -2610,55 +2298,31 @@ void setBleNotificationDescriptors(bool enabled) {
   }
 }
 
-void publishGpsSatellitesInView(uint32_t now) {
-  if (now - lastGpsSatellitesInViewNotifyMs <
-      kGpsSatellitesInViewNotifyIntervalMs) {
-    return;
-  }
-
-  uint16_t satellitesInView = 0;
-  if (!readGpsSatellitesInView(satellitesInView)) {
-    return;
-  }
-
-  if (publishCanValue(kGpsSatellitesInViewPid, satellitesInView)) {
-    lastGpsSatellitesInViewNotifyMs = now;
-  }
-}
-
 void publishTelemetry(float pressureBar,
                       float throttlePercent,
                       float batteryVolts,
-                      float rpm,
                       float afr) {
   const uint16_t pressureCentibar = pressureBarToCentibar(pressureBar);
   const uint16_t throttleCentipercent =
       static_cast<uint16_t>(lroundf(constrain(throttlePercent, 0.0F, 100.0F) * 100.0F));
   const uint16_t batteryMillivolts = voltsToMillivolts(batteryVolts);
-  const uint16_t engineRpmRaw = rpmToUint16(rpm);
   const uint16_t afrCentivalue = afrToCentiAfr(afr);
 
   publishCanValue(kBrakePressurePid, pressureCentibar);
   publishCanValue(kThrottlePositionPid, throttleCentipercent);
   publishCanValue(kBatteryVoltagePid, batteryMillivolts);
-  publishCanValue(kEngineRpmPid, engineRpmRaw);
   publishCanValue(kAfrPid, afrCentivalue);
 
   const uint32_t now = millis();
-  publishGpsSatellitesInView(now);
 
   if (now - lastBleTxLogMs >= kBleTxLogIntervalMs) {
     lastBleTxLogMs = now;
-    char satellitesInViewText[8] = {};
-    formatGpsSatellitesInView(satellitesInViewText, sizeof(satellitesInViewText));
     Serial.printf(
-        "BLE TX brake=%5.1f bar, throttle=%5.1f%%, battery=%6.3fV, rpm=%5.0f, AFR=%5.2f, view=%s\n",
+        "BLE TX brake=%5.1f bar, throttle=%5.1f%%, battery=%6.3fV, AFR=%5.2f\n",
         pressureBar,
         throttlePercent,
         batteryVolts,
-        rpm,
-        afr,
-        satellitesInViewText);
+        afr);
   }
 }
 
@@ -2691,9 +2355,7 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
       brakePressurePidAllowed = false;
       throttlePositionPidAllowed = false;
       batteryVoltagePidAllowed = false;
-      engineRpmPidAllowed = false;
       afrPidAllowed = false;
-      gpsSatellitesInViewPidAllowed = false;
       Serial.println("RaceChrono filter: deny all PIDs");
       return;
     }
@@ -2703,9 +2365,7 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
       brakePressurePidAllowed = true;
       throttlePositionPidAllowed = true;
       batteryVoltagePidAllowed = true;
-      engineRpmPidAllowed = true;
       afrPidAllowed = true;
-      gpsSatellitesInViewPidAllowed = true;
       const uint16_t requestedIntervalMs = readUint16Be(data + 1);
       notifyIntervalMs = normalizeNotifyInterval(requestedIntervalMs);
       Serial.printf(
@@ -2722,21 +2382,15 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
       const bool knownPid = pid == kBrakePressurePid ||
                             pid == kThrottlePositionPid ||
                             pid == kBatteryVoltagePid ||
-                            pid == kEngineRpmPid ||
-                            pid == kAfrPid ||
-                            pid == kGpsSatellitesInViewPid;
+                            pid == kAfrPid;
       if (pid == kBrakePressurePid) {
         brakePressurePidAllowed = true;
       } else if (pid == kThrottlePositionPid) {
         throttlePositionPidAllowed = true;
       } else if (pid == kBatteryVoltagePid) {
         batteryVoltagePidAllowed = true;
-      } else if (pid == kEngineRpmPid) {
-        engineRpmPidAllowed = true;
       } else if (pid == kAfrPid) {
         afrPidAllowed = true;
-      } else if (pid == kGpsSatellitesInViewPid) {
-        gpsSatellitesInViewPidAllowed = true;
       }
       if (knownPid) {
         notifyIntervalMs = interval;
@@ -2813,19 +2467,14 @@ void setup() {
                 static_cast<unsigned long>(kThrottlePositionPid));
   Serial.printf("RaceChrono BLE CAN PID 0x%08lX: battery voltage, millivolts\n",
                 static_cast<unsigned long>(kBatteryVoltagePid));
-  Serial.printf("RaceChrono BLE CAN PID 0x%08lX: engine RPM, rpm\n",
-                static_cast<unsigned long>(kEngineRpmPid));
   Serial.printf("RaceChrono BLE CAN PID 0x%08lX: AFR, centi-AFR\n",
                 static_cast<unsigned long>(kAfrPid));
-  Serial.printf("RaceChrono BLE CAN PID 0x%08lX: GPS satellites in view, count\n",
-                static_cast<unsigned long>(kGpsSatellitesInViewPid));
   Serial.printf("RaceChrono BLE GPS: native GPS feature on characteristics 0x0003/0x0004\n");
 
   loadThrottleCalibration();
   loadGpsConfigState();
   startGps();
   startBatteryAdc();
-  startTachInput();
   startAdc();
   startDisplay();
   calibrateThrottle();
@@ -2840,14 +2489,13 @@ void loop() {
   updateBrakePressureFromAdc(now);
   updateAfrFromAdc(now);
   updateBatteryFromAdc(now);
-  updateEngineRpm(now);
   updateGpsFromSerial(now);
   updateLedIdleBlink(now);
   updateDisplay(now);
 
   if (bleClientConnected && now - lastCanNotifyMs >= notifyIntervalMs) {
     lastCanNotifyMs = now;
-    publishTelemetry(brakePressureBar, throttlePercent, batteryVolts, engineRpm, afr);
+    publishTelemetry(brakePressureBar, throttlePercent, batteryVolts, afr);
   }
 
   printAdcReadings(now);
