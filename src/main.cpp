@@ -1,6 +1,4 @@
 #include <Arduino.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <BLE2902.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -49,12 +47,6 @@ constexpr uint8_t kAdcSdaPin = 22;
 constexpr uint8_t kAdcSclPin = 19;
 constexpr uint32_t kAdcI2cClockHz = 400000;
 constexpr uint16_t kAdcI2cTimeoutMs = 25;
-constexpr int8_t kDisplayResetPin = -1;
-constexpr uint8_t kDisplayWidth = 128;
-constexpr uint8_t kDisplayHeight = 64;
-constexpr uint8_t kDisplayPrimaryI2cAddress = 0x3C;
-constexpr uint8_t kDisplaySecondaryI2cAddress = 0x3D;
-constexpr uint16_t kDisplayUpdateIntervalMs = 500;
 constexpr uint16_t kAdcReadIntervalMs = 5000;
 constexpr uint16_t kAdcMissingLogIntervalMs = 5000;
 constexpr float kAds1115VoltsPerBit = 6.144F / 32768.0F;
@@ -211,10 +203,6 @@ BLE2902 *gpsMainNotifyDescriptor = nullptr;
 BLE2902 *gpsTimeNotifyDescriptor = nullptr;
 Preferences throttleCalibrationPrefs;
 Preferences gpsConfigPrefs;
-Adafruit_SSD1306 display(kDisplayWidth,
-                         kDisplayHeight,
-                         &Wire,
-                         kDisplayResetPin);
 HardwareSerial gpsSerial(2);
 GpsNavState gpsNav = {};
 GpsUbxStreamParser gpsUbxStreamParser = {};
@@ -234,7 +222,6 @@ uint32_t lastLedToggleMs = 0;
 uint32_t lastLedIdleBlinkMs = 0;
 uint32_t lastAdcReadMs = 0;
 uint32_t lastAdcMissingLogMs = 0;
-uint32_t lastDisplayUpdateMs = 0;
 uint32_t lastThrottleAdcReadMs = 0;
 uint32_t lastBrakePressureAdcReadMs = 0;
 uint32_t lastBatteryAdcReadMs = 0;
@@ -272,7 +259,6 @@ char gpsDebugHexSample[kGpsDebugHexSampleByteCount * 3 + 1] = {};
 uint32_t gpsLastDateHourValue = 0;
 uint8_t gpsSyncBits = 0;
 uint8_t adcI2cAddress = 0;
-uint8_t displayI2cAddress = 0;
 int16_t ads1115AdcRaw[4] = {};
 float ads1115AdcVolts[4] = {};
 bool ads1115AdcValid[4] = {};
@@ -307,7 +293,6 @@ bool ledOn = false;
 bool ledIdleBlinkOn = false;
 bool ledIdleConnected = false;
 bool ledSensorActive = false;
-bool displayReady = false;
 bool gpsMainDirty = true;
 bool gpsTimeDirty = true;
 bool gpsSynchronizedCanSnapshotPending = false;
@@ -1134,17 +1119,6 @@ uint8_t findAds1115Address() {
   return 0;
 }
 
-uint8_t findSsd1306Address() {
-  if (isI2cDevicePresent(kDisplayPrimaryI2cAddress)) {
-    return kDisplayPrimaryI2cAddress;
-  }
-  if (isI2cDevicePresent(kDisplaySecondaryI2cAddress)) {
-    return kDisplaySecondaryI2cAddress;
-  }
-
-  return 0;
-}
-
 void startAdc() {
   Wire.begin(kAdcSdaPin, kAdcSclPin);
   Wire.setClock(kAdcI2cClockHz);
@@ -1160,37 +1134,6 @@ void startAdc() {
       adcI2cAddress,
       kAdcSdaPin,
       kAdcSclPin);
-}
-
-void startDisplay() {
-  displayI2cAddress = findSsd1306Address();
-  if (displayI2cAddress == 0) {
-    Serial.printf("SSD1306 display not found on I2C SDA=%u SCL=%u\n",
-                  kAdcSdaPin,
-                  kAdcSclPin);
-    return;
-  }
-
-  if (!display.begin(SSD1306_SWITCHCAPVCC, displayI2cAddress, true, false)) {
-    Serial.printf("SSD1306 display init failed at 0x%02X\n",
-                  displayI2cAddress);
-    displayI2cAddress = 0;
-    return;
-  }
-
-  displayReady = true;
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print("ADS1115");
-  display.display();
-
-  Serial.printf(
-      "SSD1306 display found at 0x%02X, resolution=%ux%u, showing TH/BR/AF/BAT volts\n",
-      displayI2cAddress,
-      kDisplayWidth,
-      kDisplayHeight);
 }
 
 void startBatteryAdc() {
@@ -1786,61 +1729,6 @@ void startGps() {
   configureGpsAtCommonBaudRates("startup");
   logAndEnableGpsGlonassIfNeeded();
   configureGpsRuntimeUbxMessages("startup");
-}
-
-void formatDisplayAdsVoltageLine(char *line,
-                                 size_t lineSize,
-                                 const char *label,
-                                 uint8_t channel) {
-  if (channel <= 3 && ads1115AdcValid[channel]) {
-    snprintf(line, lineSize, "%s %.3fV", label, ads1115AdcVolts[channel]);
-    return;
-  }
-
-  snprintf(line, lineSize, "%s --.--V", label);
-}
-
-void formatDisplayBatteryLine(char *line, size_t lineSize) {
-  if (batteryAdcValid) {
-    snprintf(line, lineSize, "BAT %.2fV", batteryVolts);
-    return;
-  }
-
-  snprintf(line, lineSize, "BAT --.--V");
-}
-
-void updateDisplay(uint32_t now) {
-  if (!displayReady || now - lastDisplayUpdateMs < kDisplayUpdateIntervalMs) {
-    return;
-  }
-
-  lastDisplayUpdateMs = now;
-
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(2);
-
-  char line[16] = {};
-  formatDisplayAdsVoltageLine(line, sizeof(line), "TH", kThrottleAdcChannel);
-  display.setCursor(0, 0);
-  display.print(line);
-
-  formatDisplayAdsVoltageLine(line,
-                              sizeof(line),
-                              "BR",
-                              kBrakePressureAdcChannel);
-  display.setCursor(0, 16);
-  display.print(line);
-
-  formatDisplayAdsVoltageLine(line, sizeof(line), "AF", kAfrAdcChannel);
-  display.setCursor(0, 32);
-  display.print(line);
-
-  formatDisplayBatteryLine(line, sizeof(line));
-  display.setCursor(0, 48);
-  display.print(line);
-
-  display.display();
 }
 
 void printAdcReadings(uint32_t now) {
@@ -2820,7 +2708,6 @@ void setup() {
   startGps();
   startBatteryAdc();
   startAdc();
-  startDisplay();
   calibrateThrottle();
   startRaceChronoBle();
   Serial.printf("BLE advertising as \"%s\"\n", kDeviceName);
@@ -2836,7 +2723,6 @@ void loop() {
   updateGpsFromSerial(now);
   publishGpsSynchronizedCanSnapshot(now);
   updateLedIdleBlink(now);
-  updateDisplay(now);
 
   if (canSendBleNotification(canMainNotifyDescriptor)) {
     bool canTelemetryPublished = false;
