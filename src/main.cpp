@@ -1,8 +1,5 @@
 #include <Arduino.h>
-#include <BLE2902.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
+#include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <Wire.h>
 
@@ -26,6 +23,10 @@ constexpr uint8_t kTelemetryBatteryVoltageOffset = 6;
 constexpr uint16_t kDefaultNotifyIntervalMs = 50;
 constexpr uint16_t kMinNotifyIntervalMs = 50;
 constexpr uint16_t kBleReconnectQuietMs = 750;
+constexpr uint16_t kBleConnMinIntervalUnits = 0x0C;   // 15 ms
+constexpr uint16_t kBleConnMaxIntervalUnits = 0x18;   // 30 ms
+constexpr uint16_t kBleConnLatency = 0;
+constexpr uint16_t kBleConnTimeoutUnits = 400;        // 4 s supervision timeout
 constexpr uint16_t kBleTxLogIntervalMs = 30000;
 constexpr uint16_t kMaxBrakePressureBar = 250;
 constexpr uint8_t kLedPin = 5;
@@ -49,7 +50,7 @@ constexpr uint16_t kLedDisconnectedBlinkIntervalMs = 2000;
 constexpr float kLedThrottleThresholdPercent = 1.0F;
 constexpr uint8_t kAdcSdaPin = 22;
 constexpr uint8_t kAdcSclPin = 19;
-constexpr uint32_t kAdcI2cClockHz = 400000;
+constexpr uint32_t kAdcI2cClockHz = 100000;
 constexpr uint16_t kAdcI2cTimeoutMs = 25;
 constexpr uint16_t kAdcLogIntervalMs = 5000;
 constexpr uint16_t kAdcMissingLogIntervalMs = 5000;
@@ -77,12 +78,12 @@ constexpr uint16_t kGpsMeasurementRateMs = 1000 / kGpsNavigationRateHz;
 constexpr uint16_t kGpsFreshAgeMs = 2500;
 constexpr uint16_t kGpsDebugLogIntervalMs = 30000;
 constexpr uint16_t kGpsBaudProbeIntervalMs = 6000;
-constexpr uint16_t kLoopStepWarnMs = 50;
-constexpr uint16_t kLoopWarnMs = 100;
-constexpr uint16_t kLoopDiagnosticsIntervalMs = 5000;
 constexpr uint8_t kGpsDebugRawSampleSize = 96;
 constexpr uint8_t kGpsDebugHexSampleByteCount = 32;
-constexpr uint16_t kGpsUbxMaxPayloadLength = 100;
+constexpr uint16_t kGpsUbxMaxPayloadLength = 768;
+constexpr uint8_t kGpsUbxNavSatHeaderLength = 8;
+constexpr uint8_t kGpsUbxNavSatSvLength = 12;
+constexpr uint8_t kGpsUbxNavSatUartRate = 10;
 constexpr uint16_t kGpsSignalConfigPollTimeoutMs = 700;
 constexpr uint16_t kThrottleZeroCalibrationMs = 1000;
 constexpr uint16_t kThrottleOpenCalibrationPauseMs = 2000;
@@ -98,27 +99,22 @@ constexpr float kThrottlePercentDeadband = 0.2F;
 constexpr float kBrakePressureSupplyVolts = 5.10F;
 constexpr float kBrakePressureZeroRatio = 0.12F;
 constexpr float kBrakePressureFullRatio = 0.87F;
-constexpr float kBrakePressureZeroVolts =
+constexpr float kDefaultBrakePressureZeroVolts =
     kBrakePressureSupplyVolts * kBrakePressureZeroRatio;
 constexpr float kBrakePressureFullVolts =
     kBrakePressureSupplyVolts * kBrakePressureFullRatio;
+constexpr uint16_t kBrakeZeroCalibrationMs = 1000;
+constexpr float kMinBrakeZeroCalibrationVolts = 0.5F;
+constexpr float kMaxBrakeZeroCalibrationVolts = 0.7F;
 constexpr float kBrakePressureHoldDeadbandBar = 0.25F;
 constexpr float kBatteryDividerMultiplier = 1.951091F;
 constexpr float kBatteryAdcFilterAlpha = 0.2F;
-constexpr float kAfrDividerMultiplier = 2.0F;
-constexpr float kAfrCalibrationLowVolts = 2.47F;
-constexpr float kAfrCalibrationLow = 15.3F;
-constexpr float kAfrCalibrationHighVolts = 4.764F;
-constexpr float kAfrCalibrationHigh = 20.0F;
-constexpr float kAfrCalibrationAfrPerVolt =
-    (kAfrCalibrationHigh - kAfrCalibrationLow) /
-    (kAfrCalibrationHighVolts - kAfrCalibrationLowVolts);
-constexpr float kAfrAtZeroVolts =
-    kAfrCalibrationLow -
-    kAfrCalibrationLowVolts * kAfrCalibrationAfrPerVolt;
+constexpr float kAfrAdcFilterAlpha = 0.2F;
 constexpr char kThrottleCalibrationPrefsNamespace[] = "throttle";
 constexpr char kThrottleZeroPrefsKey[] = "zero_v";
 constexpr char kThrottleFullPrefsKey[] = "full_v";
+constexpr char kBrakeCalibrationPrefsNamespace[] = "brake";
+constexpr char kBrakeZeroPrefsKey[] = "zero_v";
 constexpr char kGpsConfigPrefsNamespace[] = "gps";
 constexpr char kGpsGlonassProfilePrefsKey[] = "glo_prof";
 
@@ -132,6 +128,7 @@ constexpr uint8_t kGpsUbxIdCfgMsg = 0x01;
 constexpr uint8_t kGpsUbxIdCfgRate = 0x08;
 constexpr uint8_t kGpsUbxIdNavDop = 0x04;
 constexpr uint8_t kGpsUbxIdNavPvt = 0x07;
+constexpr uint8_t kGpsUbxIdNavSat = 0x35;
 constexpr uint8_t kGpsUbxIdValset = 0x8A;
 constexpr uint8_t kGpsUbxIdValget = 0x8B;
 constexpr uint8_t kGpsUbxValsetLayerRam = 0x01;
@@ -155,6 +152,41 @@ constexpr uint32_t kGpsSignalQzssEnaKey = 0x10310024;
 constexpr uint32_t kGpsSignalQzssL1CaEnaKey = 0x10310012;
 constexpr uint32_t kGpsSignalGloEnaKey = 0x10310025;
 constexpr uint32_t kGpsSignalGloL1EnaKey = 0x10310018;
+
+struct AfrScalePoint {
+  float afr;
+  float volts;
+};
+
+// Keep points sorted by voltage; values between points are interpolated.
+constexpr AfrScalePoint kAfrScalePoints[] = {
+    {10.0F, -0.501F},
+    {11.1F, -0.174F},
+    {11.2F, -0.138F},
+    {14.1F, 0.564F},
+    {14.3F, 0.606F},
+    {14.4F, 0.873F},
+    {14.6F, 0.903F},
+    {15.0F, 0.999F},
+    {15.3F, 1.239F},
+    {15.8F, 1.383F},
+    {18.4F, 2.001F},
+    {19.4F, 2.253F},
+    {20.0F, 2.388F},
+};
+constexpr size_t kAfrScalePointCount =
+    sizeof(kAfrScalePoints) / sizeof(kAfrScalePoints[0]);
+static_assert(kAfrScalePointCount >= 2,
+              "AFR scale needs at least two calibration points");
+
+struct GpsNavSatState {
+  bool valid;
+  uint32_t updatedMs;
+  uint8_t numSvs;
+  uint8_t visibleCount;
+  uint8_t usedCount;
+  uint8_t bestCno;
+};
 
 struct GpsNavState {
   bool locationValid;
@@ -197,21 +229,23 @@ struct GpsUbxStreamParser {
   uint8_t payload[kGpsUbxMaxPayloadLength];
 };
 
-BLEServer *bleServer = nullptr;
-BLECharacteristic *canMainCharacteristic = nullptr;
-BLECharacteristic *gpsMainCharacteristic = nullptr;
-BLECharacteristic *gpsTimeCharacteristic = nullptr;
-BLE2902 *canMainNotifyDescriptor = nullptr;
-BLE2902 *gpsMainNotifyDescriptor = nullptr;
-BLE2902 *gpsTimeNotifyDescriptor = nullptr;
+NimBLECharacteristic *canMainCharacteristic = nullptr;
+NimBLECharacteristic *gpsMainCharacteristic = nullptr;
+NimBLECharacteristic *gpsTimeCharacteristic = nullptr;
 Preferences throttleCalibrationPrefs;
+Preferences brakeCalibrationPrefs;
 Preferences gpsConfigPrefs;
 HardwareSerial gpsSerial(2);
 GpsNavState gpsNav = {};
+GpsNavSatState gpsNavSat = {};
 GpsUbxStreamParser gpsUbxStreamParser = {};
 
 bool bleClientConnected = false;
-bool bleWasConnected = false;
+bool canMainSubscribed = false;
+bool gpsMainSubscribed = false;
+bool gpsTimeSubscribed = false;
+uint32_t bleNotifyOkCount = 0;
+uint32_t bleNotifyFailCount = 0;
 bool allowAllPids = true;
 bool telemetryPidAllowed = true;
 uint16_t notifyIntervalMs = kDefaultNotifyIntervalMs;
@@ -232,11 +266,9 @@ uint32_t lastGpsDebugValidUbxPackets = 0;
 uint32_t lastGpsDebugChecksumFailures = 0;
 uint32_t lastGpsDebugPvtPackets = 0;
 uint32_t lastGpsDebugDopPackets = 0;
+uint32_t lastGpsDebugSatPackets = 0;
 uint32_t lastGpsBaudProbeMs = 0;
 uint32_t lastGpsBaudProbePvtPackets = 0;
-uint32_t lastLoopDiagnosticsMs = 0;
-uint32_t maxLoopDurationMs = 0;
-uint32_t slowLoopCount = 0;
 uint32_t gpsCurrentBaudRate = kGpsInitialBaudRate;
 uint32_t gpsUbxBytesProcessed = 0;
 uint32_t gpsUbxValidPacketCount = 0;
@@ -245,6 +277,7 @@ uint32_t gpsUbxUnexpectedPacketCount = 0;
 uint32_t gpsUbxTooLongPacketCount = 0;
 uint32_t gpsUbxPvtPacketCount = 0;
 uint32_t gpsUbxDopPacketCount = 0;
+uint32_t gpsUbxSatPacketCount = 0;
 uint16_t gpsDebugDollarCount = 0;
 uint16_t gpsDebugStarCount = 0;
 uint16_t gpsDebugLineFeedCount = 0;
@@ -258,6 +291,9 @@ char gpsDebugHexSample[kGpsDebugHexSampleByteCount * 3 + 1] = {};
 uint32_t gpsLastDateHourValue = 0;
 uint8_t gpsSyncBits = 0;
 uint8_t adcI2cAddress = 0;
+uint32_t adcReadFailureCount = 0;
+uint32_t adcBusRecoveryCount = 0;
+uint32_t adcNotFoundCount = 0;
 int16_t ads1115AdcRaw[4] = {};
 float ads1115AdcVolts[4] = {};
 bool ads1115AdcValid[4] = {};
@@ -270,8 +306,10 @@ float throttleFullVolts = kDefaultThrottleFullVolts;
 bool throttleAdcValid = false;
 bool throttleFilterInitialized = false;
 bool throttleCalibrationPrefsReady = false;
+bool brakeCalibrationPrefsReady = false;
 bool gpsConfigPrefsReady = false;
 bool gpsGlonassProfilePersisted = false;
+float brakePressureZeroVolts = kDefaultBrakePressureZeroVolts;
 int16_t brakePressureAdcRaw = 0;
 float brakePressureAdcVolts = 0.0F;
 float brakePressureBar = 0.0F;
@@ -279,9 +317,10 @@ bool brakePressureAdcValid = false;
 bool brakePressureFilterInitialized = false;
 int16_t afrAdcRaw = 0;
 float afrAdcVolts = 0.0F;
-float afrSignalVolts = 0.0F;
-float afr = kAfrAtZeroVolts;
+float afrFilteredVolts = 0.0F;
+float afr = kAfrScalePoints[0].afr;
 bool afrAdcValid = false;
+bool afrFilterInitialized = false;
 int16_t batteryAdcRaw = 0;
 float batteryAdcVolts = 0.0F;
 float batteryMeasuredVolts = 0.0F;
@@ -292,9 +331,9 @@ bool ledOn = false;
 bool ledIdleBlinkOn = false;
 bool ledIdleConnected = false;
 bool ledSensorActive = false;
+bool telemetryDirty = false;
 bool gpsMainDirty = true;
 bool gpsTimeDirty = true;
-bool gpsSynchronizedCanSnapshotPending = false;
 bool gpsDateHourInitialized = false;
 bool gpsLocationWasFresh = false;
 bool gpsAltitudeWasFresh = false;
@@ -498,6 +537,46 @@ void saveThrottleCalibrationValue(const char *key, float volts) {
   throttleCalibrationPrefs.putFloat(key, volts);
 }
 
+bool isBrakeZeroCalibrationValid(float volts) {
+  return volts >= kMinBrakeZeroCalibrationVolts &&
+         volts <= kMaxBrakeZeroCalibrationVolts;
+}
+
+void loadBrakeCalibration() {
+  brakeCalibrationPrefsReady =
+      brakeCalibrationPrefs.begin(kBrakeCalibrationPrefsNamespace, false);
+
+  if (!brakeCalibrationPrefsReady) {
+    Serial.printf(
+        "Brake zero calibration NVS unavailable, using default zero=%.3fV full=%.3fV\n",
+        brakePressureZeroVolts,
+        kBrakePressureFullVolts);
+    return;
+  }
+
+  const float storedZeroVolts =
+      brakeCalibrationPrefs.getFloat(kBrakeZeroPrefsKey,
+                                     kDefaultBrakePressureZeroVolts);
+
+  brakePressureZeroVolts = isBrakeZeroCalibrationValid(storedZeroVolts)
+                               ? storedZeroVolts
+                               : kDefaultBrakePressureZeroVolts;
+
+  Serial.printf("Brake zero calibration loaded: zero=%.3fV full=%.3fV\n",
+                brakePressureZeroVolts,
+                kBrakePressureFullVolts);
+}
+
+void saveBrakeCalibrationValue(const char *key, float volts) {
+  if (!brakeCalibrationPrefsReady) {
+    Serial.printf("Brake zero calibration NVS unavailable, not saving %.3fV\n",
+                  volts);
+    return;
+  }
+
+  brakeCalibrationPrefs.putFloat(key, volts);
+}
+
 void loadGpsConfigState() {
   gpsConfigPrefsReady = gpsConfigPrefs.begin(kGpsConfigPrefsNamespace, false);
   if (!gpsConfigPrefsReady) {
@@ -536,12 +615,17 @@ float adcVoltsToThrottlePercent(float volts) {
 }
 
 float adcVoltsToBrakePressureBar(float volts) {
-  constexpr float kBrakePressureSpanVolts =
-      kBrakePressureFullVolts - kBrakePressureZeroVolts;
+  const float brakePressureSpanVolts =
+      kBrakePressureFullVolts - brakePressureZeroVolts;
+  if (brakePressureSpanVolts <= 0.01F) {
+    return volts > brakePressureZeroVolts
+               ? static_cast<float>(kMaxBrakePressureBar)
+               : 0.0F;
+  }
 
-  return constrain((volts - kBrakePressureZeroVolts) *
+  return constrain((volts - brakePressureZeroVolts) *
                        static_cast<float>(kMaxBrakePressureBar) /
-                       kBrakePressureSpanVolts,
+                       brakePressureSpanVolts,
                    0.0F,
                    static_cast<float>(kMaxBrakePressureBar));
 }
@@ -551,14 +635,25 @@ float adcVoltsToBatteryVolts(float volts) {
 }
 
 float adcVoltsToAfr(float volts) {
-  const float signalVolts = max(0.0F, volts * kAfrDividerMultiplier);
-  const float afr =
-      kAfrCalibrationLow +
-      (signalVolts - kAfrCalibrationLowVolts) * kAfrCalibrationAfrPerVolt;
+  if (volts <= kAfrScalePoints[0].volts) {
+    return kAfrScalePoints[0].afr;
+  }
 
-  return constrain(afr,
-                   kAfrAtZeroVolts,
-                   kAfrCalibrationHigh);
+  for (size_t index = 1; index < kAfrScalePointCount; ++index) {
+    const AfrScalePoint &lower = kAfrScalePoints[index - 1];
+    const AfrScalePoint &upper = kAfrScalePoints[index];
+    if (volts <= upper.volts) {
+      const float spanVolts = upper.volts - lower.volts;
+      if (spanVolts <= 0.000001F) {
+        return upper.afr;
+      }
+
+      const float ratio = (volts - lower.volts) / spanVolts;
+      return lower.afr + ratio * (upper.afr - lower.afr);
+    }
+  }
+
+  return kAfrScalePoints[kAfrScalePointCount - 1].afr;
 }
 
 void invalidateThrottleAdc() {
@@ -577,10 +672,11 @@ void invalidateBrakePressureAdc() {
 
 void invalidateAfrAdc() {
   afrAdcValid = false;
+  afrFilterInitialized = false;
   afrAdcRaw = 0;
   afrAdcVolts = 0.0F;
-  afrSignalVolts = 0.0F;
-  afr = kAfrAtZeroVolts;
+  afrFilteredVolts = 0.0F;
+  afr = kAfrScalePoints[0].afr;
 }
 
 void invalidateBatteryAdc() {
@@ -604,6 +700,24 @@ void invalidateAds1115Measurements() {
   invalidateAfrAdc();
 }
 
+void recoverI2cBus();
+uint8_t findAds1115Address();
+
+void handleAdcReadFailure(const char *label, uint8_t channel) {
+  ++adcReadFailureCount;
+  Serial.printf(
+      "ADS1115 %s A%u read failed at 0x%02X, recovering I2C bus (fails=%lu)\n",
+      label, channel, adcI2cAddress,
+      static_cast<unsigned long>(adcReadFailureCount));
+  invalidateAds1115Measurements();
+  recoverI2cBus();
+  // Сразу пробуем переподключиться, чтобы не ждать следующего цикла ре-скана.
+  adcI2cAddress = findAds1115Address();
+  if (adcI2cAddress == 0) {
+    ++adcNotFoundCount;
+  }
+}
+
 float updateThrottleFilteredVolts(float volts, bool resetFilter) {
   if (resetFilter || !throttleFilterInitialized) {
     throttleFilteredVolts = volts;
@@ -625,6 +739,17 @@ float updateBatteryFilteredVolts(float volts) {
 
   batteryVolts += kBatteryAdcFilterAlpha * (volts - batteryVolts);
   return batteryVolts;
+}
+
+float updateAfrFilteredVolts(float volts) {
+  if (!afrFilterInitialized) {
+    afrFilteredVolts = volts;
+    afrFilterInitialized = true;
+    return afrFilteredVolts;
+  }
+
+  afrFilteredVolts += kAfrAdcFilterAlpha * (volts - afrFilteredVolts);
+  return afrFilteredVolts;
 }
 
 float updateBrakePressureFilteredBar(float pressureBar) {
@@ -653,6 +778,7 @@ void updateThrottleAdcState(int16_t rawValue, float volts, bool resetFilter) {
   }
 
   throttleAdcValid = true;
+  telemetryDirty = true;
 }
 
 void updateBrakePressureAdcState(int16_t rawValue, float volts) {
@@ -660,14 +786,15 @@ void updateBrakePressureAdcState(int16_t rawValue, float volts) {
   brakePressureAdcVolts = volts;
   updateBrakePressureFilteredBar(adcVoltsToBrakePressureBar(volts));
   brakePressureAdcValid = true;
+  telemetryDirty = true;
 }
 
 void updateAfrAdcState(int16_t rawValue, float volts) {
   afrAdcRaw = rawValue;
   afrAdcVolts = volts;
-  afrSignalVolts = max(0.0F, volts * kAfrDividerMultiplier);
-  afr = adcVoltsToAfr(volts);
+  afr = adcVoltsToAfr(updateAfrFilteredVolts(volts));
   afrAdcValid = true;
+  telemetryDirty = true;
 }
 
 void updateBatteryAdcState(int16_t rawValue, float volts) {
@@ -676,6 +803,7 @@ void updateBatteryAdcState(int16_t rawValue, float volts) {
   batteryMeasuredVolts = adcVoltsToBatteryVolts(volts);
   updateBatteryFilteredVolts(batteryMeasuredVolts);
   batteryAdcValid = true;
+  telemetryDirty = true;
 }
 
 void updateThrottleFromAdc(uint32_t now) {
@@ -689,11 +817,7 @@ void updateThrottleFromAdc(uint32_t now) {
   int16_t rawValue = 0;
   float volts = 0.0F;
   if (!readAds1115SingleEnded(kThrottleAdcChannel, rawValue, volts)) {
-    Serial.printf("ADS1115 throttle A%u read failed at 0x%02X, will retry scan\n",
-                  kThrottleAdcChannel,
-                  adcI2cAddress);
-    adcI2cAddress = 0;
-    invalidateAds1115Measurements();
+    handleAdcReadFailure("throttle", kThrottleAdcChannel);
     return;
   }
 
@@ -711,11 +835,7 @@ void updateBrakePressureFromAdc(uint32_t now) {
   int16_t rawValue = 0;
   float volts = 0.0F;
   if (!readAds1115SingleEnded(kBrakePressureAdcChannel, rawValue, volts)) {
-    Serial.printf("ADS1115 brake pressure A%u read failed at 0x%02X, will retry scan\n",
-                  kBrakePressureAdcChannel,
-                  adcI2cAddress);
-    adcI2cAddress = 0;
-    invalidateAds1115Measurements();
+    handleAdcReadFailure("brake pressure", kBrakePressureAdcChannel);
     return;
   }
 
@@ -732,11 +852,7 @@ void updateAfrFromAdc(uint32_t now) {
   int16_t rawValue = 0;
   float volts = 0.0F;
   if (!readAds1115SingleEnded(kAfrAdcChannel, rawValue, volts)) {
-    Serial.printf("ADS1115 AFR A%u read failed at 0x%02X, will retry scan\n",
-                  kAfrAdcChannel,
-                  adcI2cAddress);
-    adcI2cAddress = 0;
-    invalidateAds1115Measurements();
+    handleAdcReadFailure("AFR", kAfrAdcChannel);
     return;
   }
 
@@ -1083,6 +1199,126 @@ bool calibrateThrottleFull() {
   return true;
 }
 
+bool readBrakeCalibrationAverage(uint16_t durationMs,
+                                 float &averageVolts,
+                                 float &minVolts,
+                                 float &maxVolts,
+                                 int16_t &averageRaw,
+                                 uint32_t &sampleCount) {
+  if (adcI2cAddress == 0) {
+    Serial.printf(
+        "Brake zero calibration skipped: ADS1115 not found, using zero=%.3fV full=%.3fV\n",
+        brakePressureZeroVolts,
+        kBrakePressureFullVolts);
+    return false;
+  }
+
+  Serial.printf("Calibrating brake zero from ADS1115 A%u for %u ms...\n",
+                kBrakePressureAdcChannel,
+                durationMs);
+
+  const uint32_t startMs = millis();
+  uint32_t lastSampleMs = 0;
+  sampleCount = 0;
+  float voltsSum = 0.0F;
+  minVolts = 0.0F;
+  maxVolts = 0.0F;
+  int32_t rawSum = 0;
+  bool readFailed = false;
+
+  while (millis() - startMs < durationMs) {
+    const uint32_t now = millis();
+
+    if (sampleCount > 0 &&
+        now - lastSampleMs < kThrottleCalibrationSampleIntervalMs) {
+      delay(1);
+      continue;
+    }
+
+    int16_t rawValue = 0;
+    float volts = 0.0F;
+    if (readAds1115SingleEnded(kBrakePressureAdcChannel, rawValue, volts)) {
+      lastSampleMs = now;
+      if (sampleCount == 0) {
+        minVolts = volts;
+        maxVolts = volts;
+      } else {
+        minVolts = min(minVolts, volts);
+        maxVolts = max(maxVolts, volts);
+      }
+      ++sampleCount;
+      rawSum += rawValue;
+      voltsSum += volts;
+    } else {
+      Serial.printf("Brake zero calibration read failed at 0x%02X\n",
+                    adcI2cAddress);
+      readFailed = true;
+      break;
+    }
+  }
+
+  if (readFailed || sampleCount == 0) {
+    Serial.printf(
+        "Brake zero calibration failed, using zero=%.3fV full=%.3fV\n",
+        brakePressureZeroVolts,
+        kBrakePressureFullVolts);
+    return false;
+  }
+
+  averageVolts = voltsSum / static_cast<float>(sampleCount);
+  averageRaw = static_cast<int16_t>(lroundf(static_cast<float>(rawSum) /
+                                            static_cast<float>(sampleCount)));
+  return true;
+}
+
+bool calibrateBrakeZero() {
+  float averageVolts = 0.0F;
+  float minVolts = 0.0F;
+  float maxVolts = 0.0F;
+  int16_t averageRaw = 0;
+  uint32_t sampleCount = 0;
+
+  if (!readBrakeCalibrationAverage(kBrakeZeroCalibrationMs,
+                                 averageVolts,
+                                 minVolts,
+                                 maxVolts,
+                                 averageRaw,
+                                 sampleCount)) {
+    invalidateBrakePressureAdc();
+    return false;
+  }
+
+  updateBrakePressureAdcState(averageRaw, averageVolts);
+
+  if (!isBrakeZeroCalibrationValid(averageVolts)) {
+    Serial.printf(
+        "Brake zero calibration rejected: %.3fV raw=%d samples=%lu outside %.3f..%.3fV, using saved %.3fV\n",
+        averageVolts,
+        averageRaw,
+        static_cast<unsigned long>(sampleCount),
+        kMinBrakeZeroCalibrationVolts,
+        kMaxBrakeZeroCalibrationVolts,
+        brakePressureZeroVolts);
+    return false;
+  }
+
+  brakePressureZeroVolts = averageVolts;
+  brakePressureBar = 0.0F;
+  saveBrakeCalibrationValue(kBrakeZeroPrefsKey, brakePressureZeroVolts);
+
+  Serial.printf("Brake zero calibrated: %.3fV raw=%d samples=%lu, full=%.3fV\n",
+                brakePressureZeroVolts,
+                brakePressureAdcRaw,
+                static_cast<unsigned long>(sampleCount),
+                kBrakePressureFullVolts);
+  return true;
+}
+
+void calibrateBrakeZeroAtStartup() {
+  Serial.println("Brake zero calibration: release brake pedal");
+  calibrateBrakeZero();
+}
+
 void calibrateThrottle() {
   startLedFastBlink(millis());
   const bool zeroCalibrated = calibrateThrottleZero();
@@ -1118,9 +1354,33 @@ uint8_t findAds1115Address() {
   return 0;
 }
 
+void recoverI2cBus() {
+  ++adcBusRecoveryCount;
+  Wire.end();
+  pinMode(kAdcSclPin, OUTPUT_OPEN_DRAIN);
+  pinMode(kAdcSdaPin, INPUT_PULLUP);
+
+  // Прокачиваем до 9 клоков, чтобы slave отпустил залипший SDA после
+  // оборванной транзакции (характерно для Error 263 -> -1).
+  for (int i = 0; i < 9; ++i) {
+    digitalWrite(kAdcSclPin, LOW);
+    delayMicroseconds(5);
+    digitalWrite(kAdcSclPin, HIGH);
+    delayMicroseconds(5);
+    if (digitalRead(kAdcSdaPin)) {
+      break;
+    }
+  }
+
+  Wire.begin(kAdcSdaPin, kAdcSclPin);
+  Wire.setClock(kAdcI2cClockHz);
+  Wire.setTimeOut(kAdcI2cTimeoutMs);
+}
+
 void startAdc() {
   Wire.begin(kAdcSdaPin, kAdcSclPin);
   Wire.setClock(kAdcI2cClockHz);
+  Wire.setTimeOut(kAdcI2cTimeoutMs);
 
   adcI2cAddress = findAds1115Address();
   if (adcI2cAddress == 0) {
@@ -1708,8 +1968,19 @@ void configureGpsRuntimeUbxMessages(const char *reason, bool waitForAck = true) 
                     reason);
   }
 
-  Serial.printf("GPS config: native UBX NAV-PVT/NAV-DOP enabled at %uHz, baud=%lu (%s)\n",
+  sendGpsUbxSetMessageRate(kGpsUbxClassNav,
+                           kGpsUbxIdNavSat,
+                           kGpsUbxNavSatUartRate);
+  if (waitForAck) {
+    logGpsConfigAck("UBX-CFG-MSG NAV-SAT UART1",
+                    kGpsUbxClassCfg,
+                    kGpsUbxIdCfgMsg,
+                    reason);
+  }
+
+  Serial.printf("GPS config: native UBX NAV-PVT/NAV-DOP at %uHz, NAV-SAT at %uHz, baud=%lu (%s)\n",
                 kGpsNavigationRateHz,
+                kGpsNavigationRateHz / kGpsUbxNavSatUartRate,
                 static_cast<unsigned long>(gpsCurrentBaudRate),
                 reason);
 }
@@ -1734,8 +2005,10 @@ void printAdcReadings(uint32_t now) {
   if (adcI2cAddress == 0) {
     if (now - lastAdcMissingLogMs >= kAdcMissingLogIntervalMs) {
       lastAdcMissingLogMs = now;
+      recoverI2cBus();
       adcI2cAddress = findAds1115Address();
       if (adcI2cAddress == 0) {
+        ++adcNotFoundCount;
         Serial.printf("ADS1115 ADC still not found on I2C SDA=%u SCL=%u\n",
                       kAdcSdaPin,
                       kAdcSclPin);
@@ -1754,7 +2027,7 @@ void printAdcReadings(uint32_t now) {
   lastAdcLogMs = now;
 
   Serial.printf(
-      "ADC throttle A0=%.3fV -> %.1f%%, brake A1=%.3fV -> %.1f bar, AFR A2=%.3fV -> %.2f, battery GPIO%u raw=%d adc=%.3fV measured=%.3fV filtered=%.3fV\n",
+      "ADC throttle A0=%.3fV -> %.1f%%, brake A1=%.3fV -> %.1f bar, AFR A2=%.3fV -> %.2f, battery GPIO%u raw=%d adc=%.3fV measured=%.3fV filtered=%.3fV, errors fails=%lu recoveries=%lu notfound=%lu\n",
       throttleAdcVolts,
       throttlePercent,
       brakePressureAdcVolts,
@@ -1765,7 +2038,10 @@ void printAdcReadings(uint32_t now) {
       batteryAdcRaw,
       batteryAdcVolts,
       batteryMeasuredVolts,
-      batteryVolts);
+      batteryVolts,
+      static_cast<unsigned long>(adcReadFailureCount),
+      static_cast<unsigned long>(adcBusRecoveryCount),
+      static_cast<unsigned long>(adcNotFoundCount));
 }
 
 uint16_t pressureBarToCentibar(float pressureBar) {
@@ -1779,7 +2055,9 @@ uint16_t voltsToMillivolts(float volts) {
 }
 
 uint16_t afrToCentiAfr(float afr) {
-  afr = constrain(afr, kAfrAtZeroVolts, kAfrCalibrationHigh);
+  afr = constrain(afr,
+                  kAfrScalePoints[0].afr,
+                  kAfrScalePoints[kAfrScalePointCount - 1].afr);
   return static_cast<uint16_t>(lroundf(afr * 100.0F));
 }
 
@@ -1821,6 +2099,11 @@ bool isGpsDateFresh() {
 bool isGpsDopFresh() {
   return gpsNav.dopValid &&
          millis() - gpsNav.dopUpdatedMs <= kGpsFreshAgeMs;
+}
+
+bool isGpsSatFresh() {
+  return gpsNavSat.valid &&
+         millis() - gpsNavSat.updatedMs <= kGpsFreshAgeMs;
 }
 
 void formatGpsUnsigned(char *buffer,
@@ -1962,7 +2245,6 @@ void updateGpsFromNavPvt(const uint8_t *payload, uint16_t payloadLength) {
 
   ++gpsUbxPvtPacketCount;
   gpsMainDirty = true;
-  gpsSynchronizedCanSnapshotPending = true;
 }
 
 void updateGpsFromNavDop(const uint8_t *payload, uint16_t payloadLength) {
@@ -1974,6 +2256,49 @@ void updateGpsFromNavDop(const uint8_t *payload, uint16_t payloadLength) {
   gpsNav.dopUpdatedMs = millis();
   gpsNav.dopValid = true;
   ++gpsUbxDopPacketCount;
+}
+
+void updateGpsFromNavSat(const uint8_t *payload, uint16_t payloadLength) {
+  if (payloadLength < kGpsUbxNavSatHeaderLength) {
+    return;
+  }
+
+  const uint8_t numSvs = payload[5];
+  const uint16_t expectedLength =
+      static_cast<uint16_t>(kGpsUbxNavSatHeaderLength) +
+      static_cast<uint16_t>(numSvs) * kGpsUbxNavSatSvLength;
+  if (payloadLength < expectedLength) {
+    return;
+  }
+
+  uint8_t visibleCount = 0;
+  uint8_t usedCount = 0;
+  uint8_t bestCno = 0;
+  for (uint8_t i = 0; i < numSvs; ++i) {
+    const uint16_t offset =
+        static_cast<uint16_t>(kGpsUbxNavSatHeaderLength) +
+        static_cast<uint16_t>(i) * kGpsUbxNavSatSvLength;
+    const uint8_t cno = payload[offset + 2];
+    const uint32_t flags = readUint32Le(payload + offset + 8);
+
+    if (cno > 0) {
+      ++visibleCount;
+      if (cno > bestCno) {
+        bestCno = cno;
+      }
+    }
+    if ((flags & 0x01) != 0) {
+      ++usedCount;
+    }
+  }
+
+  gpsNavSat.numSvs = numSvs;
+  gpsNavSat.visibleCount = visibleCount;
+  gpsNavSat.usedCount = usedCount;
+  gpsNavSat.bestCno = bestCno;
+  gpsNavSat.updatedMs = millis();
+  gpsNavSat.valid = true;
+  ++gpsUbxSatPacketCount;
 }
 
 void handleGpsUbxFrame(uint8_t messageClass,
@@ -1995,6 +2320,11 @@ void handleGpsUbxFrame(uint8_t messageClass,
 
   if (messageClass == kGpsUbxClassNav && messageId == kGpsUbxIdNavDop) {
     updateGpsFromNavDop(payload, payloadLength);
+    return;
+  }
+
+  if (messageClass == kGpsUbxClassNav && messageId == kGpsUbxIdNavSat) {
+    updateGpsFromNavSat(payload, payloadLength);
     return;
   }
 
@@ -2288,11 +2618,31 @@ void buildGpsTimePacket(uint8_t *packet) {
   writeUint24Be(packet, syncDateHour);
 }
 
-bool canSendBleNotification(BLE2902 *descriptor) {
-  return bleClientConnected &&
-         descriptor != nullptr &&
-         descriptor->getNotifications() &&
-         millis() - bleConnectedAtMs >= kBleReconnectQuietMs;
+bool canSendBleNotification(NimBLECharacteristic *characteristic) {
+  if (!bleClientConnected ||
+      characteristic == nullptr ||
+      millis() - bleConnectedAtMs < kBleReconnectQuietMs) {
+    return false;
+  }
+
+  if (characteristic == canMainCharacteristic) {
+    return canMainSubscribed;
+  }
+  if (characteristic == gpsMainCharacteristic) {
+    return gpsMainSubscribed;
+  }
+  if (characteristic == gpsTimeCharacteristic) {
+    return gpsTimeSubscribed;
+  }
+  return false;
+}
+
+void notifyBleCharacteristic(NimBLECharacteristic *characteristic) {
+  if (characteristic->notify()) {
+    ++bleNotifyOkCount;
+  } else {
+    ++bleNotifyFailCount;
+  }
 }
 
 void updateGpsCharacteristicValues(bool notify) {
@@ -2302,8 +2652,8 @@ void updateGpsCharacteristicValues(bool notify) {
     uint8_t packet[3] = {};
     buildGpsTimePacket(packet);
     gpsTimeCharacteristic->setValue(packet, sizeof(packet));
-    if (notify && canSendBleNotification(gpsTimeNotifyDescriptor)) {
-      gpsTimeCharacteristic->notify();
+    if (notify && canSendBleNotification(gpsTimeCharacteristic)) {
+      notifyBleCharacteristic(gpsTimeCharacteristic);
     }
     gpsTimeDirty = false;
   }
@@ -2312,8 +2662,8 @@ void updateGpsCharacteristicValues(bool notify) {
     uint8_t packet[20] = {};
     buildGpsMainPacket(packet);
     gpsMainCharacteristic->setValue(packet, sizeof(packet));
-    if (notify && canSendBleNotification(gpsMainNotifyDescriptor)) {
-      gpsMainCharacteristic->notify();
+    if (notify && canSendBleNotification(gpsMainCharacteristic)) {
+      notifyBleCharacteristic(gpsMainCharacteristic);
     }
     gpsMainDirty = false;
   }
@@ -2331,12 +2681,14 @@ void printGpsDebugLog(uint32_t now) {
   const uint32_t checksumFailures = gpsUbxChecksumFailureCount;
   const uint32_t pvtPackets = gpsUbxPvtPacketCount;
   const uint32_t dopPackets = gpsUbxDopPacketCount;
+  const uint32_t satPackets = gpsUbxSatPacketCount;
   const uint32_t bytesDelta = bytesProcessed - lastGpsDebugBytesProcessed;
   const uint32_t validDelta = validUbxPackets - lastGpsDebugValidUbxPackets;
   const uint32_t checksumFailureDelta =
       checksumFailures - lastGpsDebugChecksumFailures;
   const uint32_t pvtDelta = pvtPackets - lastGpsDebugPvtPackets;
   const uint32_t dopDelta = dopPackets - lastGpsDebugDopPackets;
+  const uint32_t satDelta = satPackets - lastGpsDebugSatPackets;
   const uint16_t dollarCount = gpsDebugDollarCount;
   const uint16_t starCount = gpsDebugStarCount;
   const uint16_t lineFeedCount = gpsDebugLineFeedCount;
@@ -2347,8 +2699,13 @@ void printGpsDebugLog(uint32_t now) {
   lastGpsDebugChecksumFailures = checksumFailures;
   lastGpsDebugPvtPackets = pvtPackets;
   lastGpsDebugDopPackets = dopPackets;
+  lastGpsDebugSatPackets = satPackets;
 
   char satellites[8] = {};
+  char visibleSats[8] = {};
+  char listedSats[8] = {};
+  char usedNavSats[8] = {};
+  char bestCno[8] = {};
   char hdop[8] = {};
   char latitude[16] = {};
   char longitude[16] = {};
@@ -2358,6 +2715,22 @@ void printGpsDebugLog(uint32_t now) {
                     sizeof(satellites),
                     isGpsPvtFresh(),
                     gpsNav.numSv);
+  formatGpsUnsigned(visibleSats,
+                    sizeof(visibleSats),
+                    isGpsSatFresh(),
+                    gpsNavSat.visibleCount);
+  formatGpsUnsigned(listedSats,
+                    sizeof(listedSats),
+                    isGpsSatFresh(),
+                    gpsNavSat.numSvs);
+  formatGpsUnsigned(usedNavSats,
+                    sizeof(usedNavSats),
+                    isGpsSatFresh(),
+                    gpsNavSat.usedCount);
+  formatGpsUnsigned(bestCno,
+                    sizeof(bestCno),
+                    isGpsSatFresh() && gpsNavSat.visibleCount > 0,
+                    gpsNavSat.bestCno);
   formatGpsFloat(hdop,
                  sizeof(hdop),
                  isGpsDopFresh(),
@@ -2391,7 +2764,7 @@ void printGpsDebugLog(uint32_t now) {
                     pvtDelta,
                     dollarCount);
   Serial.printf(
-      "GPS diag state=%s RX=GPIO%u baud=%lu bytes=%lu (+%lu), ubx=%lu (+%lu), pvt=%lu (+%lu), dop=%lu (+%lu), checksum_fail=%lu (+%lu), too_long=%lu, other=%lu, fix_type=%u, used=%s, hdop=%s, lat=%s, lon=%s, speed=%s km/h, course=%s deg, $=%u, *=%u, lf=%u, headers=%u, raw=\"%s\", hex=\"%s\"\n",
+      "GPS diag state=%s RX=GPIO%u baud=%lu bytes=%lu (+%lu), ubx=%lu (+%lu), pvt=%lu (+%lu), dop=%lu (+%lu), sat=%lu (+%lu), checksum_fail=%lu (+%lu), too_long=%lu, other=%lu, fix_type=%u, used=%s, visible=%s, listed=%s, used_nav=%s, best_cno=%s, hdop=%s, lat=%s, lon=%s, speed=%s km/h, course=%s deg, $=%u, *=%u, lf=%u, headers=%u, raw=\"%s\", hex=\"%s\"\n",
       state,
       kGpsRxPin,
       static_cast<unsigned long>(gpsCurrentBaudRate),
@@ -2403,12 +2776,18 @@ void printGpsDebugLog(uint32_t now) {
       static_cast<unsigned long>(pvtDelta),
       static_cast<unsigned long>(dopPackets),
       static_cast<unsigned long>(dopDelta),
+      static_cast<unsigned long>(satPackets),
+      static_cast<unsigned long>(satDelta),
       static_cast<unsigned long>(checksumFailures),
       static_cast<unsigned long>(checksumFailureDelta),
       static_cast<unsigned long>(gpsUbxTooLongPacketCount),
       static_cast<unsigned long>(gpsUbxUnexpectedPacketCount),
       gpsNav.fixType,
       satellites,
+      visibleSats,
+      listedSats,
+      usedNavSats,
+      bestCno,
       hdop,
       latitude,
       longitude,
@@ -2455,7 +2834,7 @@ bool shouldSendPid(uint32_t pid) {
 bool publishCanPayload(uint32_t pid,
                        const uint8_t *payload,
                        size_t payloadLength) {
-  if (!canSendBleNotification(canMainNotifyDescriptor) ||
+  if (!canSendBleNotification(canMainCharacteristic) ||
       canMainCharacteristic == nullptr ||
       payloadLength == 0 ||
       payloadLength > kCanMaxPayloadLength ||
@@ -2468,7 +2847,7 @@ bool publishCanPayload(uint32_t pid,
   memcpy(packet + kCanPacketPidLength, payload, payloadLength);
 
   canMainCharacteristic->setValue(packet, kCanPacketPidLength + payloadLength);
-  canMainCharacteristic->notify();
+  notifyBleCharacteristic(canMainCharacteristic);
   return true;
 }
 
@@ -2496,18 +2875,6 @@ void buildTelemetryPayload(uint8_t *payload,
                 batteryMillivolts);
 }
 
-void setBleNotificationDescriptors(bool enabled) {
-  if (canMainNotifyDescriptor != nullptr) {
-    canMainNotifyDescriptor->setNotifications(enabled);
-  }
-  if (gpsMainNotifyDescriptor != nullptr) {
-    gpsMainNotifyDescriptor->setNotifications(enabled);
-  }
-  if (gpsTimeNotifyDescriptor != nullptr) {
-    gpsTimeNotifyDescriptor->setNotifications(enabled);
-  }
-}
-
 void publishTelemetry(float pressureBar,
                       float throttlePercent,
                       float afr,
@@ -2527,52 +2894,173 @@ void printBleTxLog(uint32_t now,
   if (now - lastBleTxLogMs >= kBleTxLogIntervalMs) {
     lastBleTxLogMs = now;
     Serial.printf(
-        "BLE TX brake=%5.1f bar, throttle=%5.1f%%, battery=%6.3fV, AFR=%5.2f\n",
+        "BLE TX brake=%5.1f bar, throttle=%5.1f%%, battery=%6.3fV, AFR=%5.2f, notify_ok=%lu fail=%lu\n",
         pressureBar,
         throttlePercent,
         batteryVolts,
-        afr);
+        afr,
+        static_cast<unsigned long>(bleNotifyOkCount),
+        static_cast<unsigned long>(bleNotifyFailCount));
   }
 }
 
-bool publishGpsSynchronizedCanSnapshot(uint32_t now) {
-  if (!gpsSynchronizedCanSnapshotPending) {
-    return false;
+const char *describeBleDisconnectReason(int reason) {
+  switch (reason) {
+    case 0x005:
+      return "authentication failure (stale phone bond?)";
+    case 0x00F:
+      return "insufficient encryption";
+    case 0x013:
+      return "remote user terminated";
+    case 0x016:
+      return "local host terminated";
+    case 0x018:
+      return "pairing not supported";
+    case 0x022:
+      return "link layer response timeout";
+    case 0x03D:
+      return "MIC failure (bond key mismatch?)";
+    case 0x03E:
+      return "connection failed to establish";
+    default:
+      return nullptr;
   }
-
-  if (!canSendBleNotification(canMainNotifyDescriptor) ||
-      now - lastCanNotifyMs < notifyIntervalMs) {
-    return false;
-  }
-
-  gpsSynchronizedCanSnapshotPending = false;
-  publishTelemetry(brakePressureBar, throttlePercent, afr, batteryVolts);
-  lastCanNotifyMs = now;
-  printBleTxLog(now, brakePressureBar, throttlePercent, batteryVolts, afr);
-  return true;
 }
 
-class RaceChronoServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer *) override {
-    bleClientConnected = true;
-    bleConnectedAtMs = millis();
-    lastCanNotifyMs = bleConnectedAtMs;
+bool isLikelyStaleBondDisconnect(int reason) {
+  return reason == 0x005 || reason == 0x00F || reason == 0x03D;
+}
+
+void logBleStaleBondHint() {
+  Serial.println(
+      "BLE hint: forget \"RaceExporter\" in phone Bluetooth settings, then "
+      "reconnect in RaceChrono");
+}
+
+void configureRaceChronoBleSecurity() {
+  NimBLEDevice::setSecurityAuth(false, false, false);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+  NimBLEDevice::setSecurityInitKey(0);
+  NimBLEDevice::setSecurityRespKey(0);
+
+  const int bondCount = NimBLEDevice::getNumBonds();
+  if (bondCount > 0) {
+    Serial.printf("BLE clearing %d stale bond(s) from NVS\n", bondCount);
+    NimBLEDevice::deleteAllBonds();
   }
 
-  void onDisconnect(BLEServer *) override {
-    bleClientConnected = false;
-    setBleNotificationDescriptors(false);
+  Serial.println("BLE security: open connection, bonding disabled");
+}
+
+class RaceChronoDeviceCallbacks : public NimBLEDeviceCallbacks {
+  int onStoreStatus(struct ble_store_status_event *event, void *) override {
+    if (event == nullptr) {
+      return 0;
+    }
+
+    if (event->event_code == BLE_STORE_EVENT_FULL ||
+        event->event_code == BLE_STORE_EVENT_OVERFLOW) {
+      Serial.println("BLE bond store full; clearing bonds");
+      NimBLEDevice::deleteAllBonds();
+    }
+    return 0;
   }
 };
 
-class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *characteristic) override {
-    const std::string value = characteristic->getValue();
-    if (value.empty()) {
+class NotifySubscriptionCallbacks : public NimBLECharacteristicCallbacks {
+ public:
+  explicit NotifySubscriptionCallbacks(bool *subscribedFlag)
+      : subscribedFlag_(subscribedFlag) {}
+
+  void onSubscribe(NimBLECharacteristic *characteristic, NimBLEConnInfo &,
+                   uint16_t subValue) override {
+    *subscribedFlag_ = (subValue & 0x0001) != 0;
+    Serial.printf("BLE subscribe: char=%s value=%u\n",
+                  characteristic->getUUID().toString().c_str(),
+                  subValue);
+  }
+
+ private:
+  bool *subscribedFlag_;
+};
+
+class RaceChronoServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer *, NimBLEConnInfo &connInfo) override {
+    bleClientConnected = true;
+    bleConnectedAtMs = millis();
+    lastCanNotifyMs = bleConnectedAtMs;
+    telemetryDirty = true;
+    Serial.printf(
+        "BLE connected: addr=%s, interval=%u units, latency=%u, timeout=%u units, "
+        "mtu=%u, bonded=%s, encrypted=%s\n",
+        connInfo.getAddress().toString().c_str(),
+        connInfo.getConnInterval(),
+        connInfo.getConnLatency(),
+        connInfo.getConnTimeout(),
+        connInfo.getMTU(),
+        connInfo.isBonded() ? "yes" : "no",
+        connInfo.isEncrypted() ? "yes" : "no");
+  }
+
+  void onMTUChange(uint16_t mtu, NimBLEConnInfo &connInfo) override {
+    Serial.printf("BLE MTU updated: addr=%s mtu=%u\n",
+                  connInfo.getAddress().toString().c_str(),
+                  mtu);
+  }
+
+  void onConnParamsUpdate(NimBLEConnInfo &connInfo) override {
+    Serial.printf(
+        "BLE params updated: addr=%s interval=%u units, latency=%u, timeout=%u units\n",
+        connInfo.getAddress().toString().c_str(),
+        connInfo.getConnInterval(),
+        connInfo.getConnLatency(),
+        connInfo.getConnTimeout());
+  }
+
+  void onAuthenticationComplete(NimBLEConnInfo &connInfo) override {
+    Serial.printf(
+        "BLE auth complete: bonded=%s encrypted=%s authenticated=%s addr=%s\n",
+        connInfo.isBonded() ? "yes" : "no",
+        connInfo.isEncrypted() ? "yes" : "no",
+        connInfo.isAuthenticated() ? "yes" : "no",
+        connInfo.getAddress().toString().c_str());
+    if (!connInfo.isEncrypted()) {
+      Serial.println(
+          "BLE auth failed: phone may have a stale bond for RaceExporter");
+      logBleStaleBondHint();
+    }
+  }
+
+  void onDisconnect(NimBLEServer *server, NimBLEConnInfo &, int reason) override {
+    bleClientConnected = false;
+    canMainSubscribed = false;
+    gpsMainSubscribed = false;
+    gpsTimeSubscribed = false;
+    server->startAdvertising();
+    const char *reasonText = describeBleDisconnectReason(reason);
+    if (reasonText != nullptr) {
+      Serial.printf(
+          "BLE disconnected: reason=0x%03X (%s), advertising restarted\n",
+          reason,
+          reasonText);
+    } else {
+      Serial.printf("BLE disconnected: reason=0x%03X, advertising restarted\n",
+                    reason);
+    }
+    if (isLikelyStaleBondDisconnect(reason)) {
+      logBleStaleBondHint();
+    }
+  }
+};
+
+class RaceChronoCanFilterCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *characteristic, NimBLEConnInfo &) override {
+    const NimBLEAttValue value = characteristic->getValue();
+    if (value.length() == 0) {
       return;
     }
 
-    const auto *data = reinterpret_cast<const uint8_t *>(value.data());
+    const uint8_t *data = value.data();
     const size_t length = value.length();
     const uint8_t commandId = data[0];
 
@@ -2617,34 +3105,39 @@ class RaceChronoCanFilterCallbacks : public BLECharacteristicCallbacks {
 };
 
 void startRaceChronoBle() {
-  BLEDevice::init(kDeviceName);
-  bleServer = BLEDevice::createServer();
+  static RaceChronoDeviceCallbacks deviceCallbacks;
+  NimBLEDevice::setDeviceCallbacks(&deviceCallbacks);
+  NimBLEDevice::init(kDeviceName);
+  configureRaceChronoBleSecurity();
+
+  NimBLEServer *bleServer = NimBLEDevice::createServer();
   bleServer->setCallbacks(new RaceChronoServerCallbacks());
 
-  BLEService *raceChronoService = bleServer->createService(kRaceChronoServiceUuid);
+  NimBLEService *raceChronoService =
+      bleServer->createService(kRaceChronoServiceUuid);
 
   canMainCharacteristic = raceChronoService->createCharacteristic(
       kCanMainCharacteristicUuid,
-      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  canMainNotifyDescriptor = new BLE2902();
-  canMainCharacteristic->addDescriptor(canMainNotifyDescriptor);
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  canMainCharacteristic->setCallbacks(
+      new NotifySubscriptionCallbacks(&canMainSubscribed));
 
-  BLECharacteristic *canFilterCharacteristic = raceChronoService->createCharacteristic(
-      kCanFilterCharacteristicUuid,
-      BLECharacteristic::PROPERTY_WRITE);
+  NimBLECharacteristic *canFilterCharacteristic =
+      raceChronoService->createCharacteristic(kCanFilterCharacteristicUuid,
+                                              NIMBLE_PROPERTY::WRITE);
   canFilterCharacteristic->setCallbacks(new RaceChronoCanFilterCallbacks());
 
   gpsMainCharacteristic = raceChronoService->createCharacteristic(
       kGpsMainCharacteristicUuid,
-      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  gpsMainNotifyDescriptor = new BLE2902();
-  gpsMainCharacteristic->addDescriptor(gpsMainNotifyDescriptor);
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  gpsMainCharacteristic->setCallbacks(
+      new NotifySubscriptionCallbacks(&gpsMainSubscribed));
 
   gpsTimeCharacteristic = raceChronoService->createCharacteristic(
       kGpsTimeCharacteristicUuid,
-      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  gpsTimeNotifyDescriptor = new BLE2902();
-  gpsTimeCharacteristic->addDescriptor(gpsTimeNotifyDescriptor);
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  gpsTimeCharacteristic->setCallbacks(
+      new NotifySubscriptionCallbacks(&gpsTimeSubscribed));
 
   uint8_t initialPacket[kCanPacketPidLength + kTelemetryPayloadLength] = {};
   writeUint32Le(initialPacket, kTelemetryPid);
@@ -2656,14 +3149,17 @@ void startRaceChronoBle() {
   canMainCharacteristic->setValue(initialPacket, sizeof(initialPacket));
   updateGpsCharacteristicValues(false);
 
-  raceChronoService->start();
-
-  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(kRaceChronoServiceUuid);
-  advertising->setScanResponse(true);
-  advertising->setMinPreferred(0x06);
-  advertising->setMinPreferred(0x12);
-  BLEDevice::startAdvertising();
+  advertising->enableScanResponse(true);
+  const bool nameSet = advertising->setName(kDeviceName);
+  advertising->setPreferredParams(kBleConnMinIntervalUnits,
+                                  kBleConnMaxIntervalUnits);
+  const bool advertisingStarted = NimBLEDevice::startAdvertising();
+  Serial.printf("BLE advertising start: started=%s active=%s name=%s\n",
+                advertisingStarted ? "yes" : "no",
+                advertising->isAdvertising() ? "yes" : "no",
+                nameSet ? "yes" : "no");
 }
 
 }  // namespace
@@ -2682,10 +3178,12 @@ void setup() {
   Serial.printf("RaceChrono BLE GPS: native GPS feature on characteristics 0x0003/0x0004\n");
 
   loadThrottleCalibration();
+  loadBrakeCalibration();
   loadGpsConfigState();
   startGps();
   startBatteryAdc();
   startAdc();
+  calibrateBrakeZeroAtStartup();
   calibrateThrottle();
   startRaceChronoBle();
   Serial.printf("BLE advertising as \"%s\"\n", kDeviceName);
@@ -2699,28 +3197,15 @@ void loop() {
   updateAfrFromAdc(now);
   updateBatteryFromAdc(now);
   updateGpsFromSerial(now);
-  publishGpsSynchronizedCanSnapshot(now);
   updateLedIdleBlink(now);
 
-  if (canSendBleNotification(canMainNotifyDescriptor)) {
-    if (now - lastCanNotifyMs >= notifyIntervalMs) {
-      lastCanNotifyMs = now;
-      publishTelemetry(brakePressureBar, throttlePercent, afr, batteryVolts);
-      printBleTxLog(now, brakePressureBar, throttlePercent, batteryVolts, afr);
-    }
+  if (canSendBleNotification(canMainCharacteristic) && telemetryDirty &&
+      now - lastCanNotifyMs >= notifyIntervalMs) {
+    lastCanNotifyMs = now;
+    publishTelemetry(brakePressureBar, throttlePercent, afr, batteryVolts);
+    telemetryDirty = false;
+    printBleTxLog(now, brakePressureBar, throttlePercent, batteryVolts, afr);
   }
 
   printAdcReadings(now);
-
-  if (!bleClientConnected && bleWasConnected) {
-    delay(500);
-    bleServer->startAdvertising();
-    Serial.println("BLE client disconnected, advertising restarted");
-    bleWasConnected = false;
-  }
-
-  if (bleClientConnected && !bleWasConnected) {
-    Serial.println("BLE client connected");
-    bleWasConnected = true;
-  }
 }

@@ -9,13 +9,6 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Upload & Monitor",
-            "type": "node-terminal",
-            "request": "launch",
-            "command": "make run",
-            "cwd": "${workspaceFolder}"
-        },
-        {
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug",
