@@ -3204,7 +3204,14 @@ void loop() {
 
   if (canSendBleNotification(canMainCharacteristic) && telemetryDirty &&
       now - lastCanNotifyMs >= notifyIntervalMs) {
-    lastCanNotifyMs = now;
+    // Фазовый сдвиг базы на интервал, а не на now, чтобы джиттер цикла не
+    // накапливался и средняя частота держалась около 1000/notifyIntervalMs.
+    lastCanNotifyMs += notifyIntervalMs;
+    // Если отстали больше чем на интервал (длинный столл), ресинхронизируемся
+    // к now, чтобы не выдать пачку догоняющих нотификаций.
+    if (now - lastCanNotifyMs >= notifyIntervalMs) {
+      lastCanNotifyMs = now;
+    }
     publishTelemetry(brakePressureBar, throttlePercent, afr, batteryVolts);
     telemetryDirty = false;
     printBleTxLog(now, brakePressureBar, throttlePercent, batteryVolts, afr);
