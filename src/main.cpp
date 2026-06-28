@@ -438,23 +438,29 @@ void updateAds1115ChannelState(uint8_t channel, int16_t rawValue, float volts) {
   ads1115AdcValid[channel] = true;
 }
 
+constexpr uint8_t kAdcConversionRegister = 0x00;
+constexpr uint8_t kAdcConfigRegister = 0x01;
+// 860 SPS -> конверсия ~1.16 мс; 2 мс с запасом.
+constexpr uint16_t kAdcConversionWaitMs = 2;
+
+uint16_t makeAds1115Config(uint8_t channel) {
+  const uint16_t mux = static_cast<uint16_t>(0x04 + channel) << 12;
+  return 0x8000 | mux | 0x0000 | 0x0100 | 0x00E0 | 0x0003;
+}
+
+// Блокирующее чтение: используется только в калибровке на старте, где
+// неблокирующий секвенсор еще не работает.
 bool readAds1115SingleEnded(uint8_t channel, int16_t &rawValue, float &volts) {
   if (channel > 3 || adcI2cAddress == 0) {
     return false;
   }
 
-  constexpr uint8_t kConversionRegister = 0x00;
-  constexpr uint8_t kConfigRegister = 0x01;
-  const uint16_t mux = static_cast<uint16_t>(0x04 + channel) << 12;
-  const uint16_t config =
-      0x8000 | mux | 0x0000 | 0x0100 | 0x00E0 | 0x0003;
-
-  if (!writeAds1115Register(kConfigRegister, config)) {
+  if (!writeAds1115Register(kAdcConfigRegister, makeAds1115Config(channel))) {
     return false;
   }
 
-  delay(2);
-  if (!readAds1115Register(kConversionRegister, rawValue)) {
+  delay(kAdcConversionWaitMs);
+  if (!readAds1115Register(kAdcConversionRegister, rawValue)) {
     return false;
   }
 
@@ -806,57 +812,94 @@ void updateBatteryAdcState(int16_t rawValue, float volts) {
   telemetryDirty = true;
 }
 
-void updateThrottleFromAdc(uint32_t now) {
-  if (adcI2cAddress == 0 ||
-      now - lastThrottleAdcReadMs < kThrottleAdcReadIntervalMs) {
-    return;
+// Неблокирующий секвенсор ADS1115: в полете всегда одна конверсия (mux общий),
+// каналы обходятся по кругу. Вместо delay(2) loop выходит и забирает результат
+// на следующей итерации, не блокируя нотификации/GPS/LED.
+enum class AdcSeqPhase : uint8_t { Idle, Converting };
+
+struct AdcRuntimeChannel {
+  uint8_t channel;
+  uint16_t intervalMs;
+  uint32_t *lastStartMs;
+  const char *label;
+};
+
+AdcRuntimeChannel adcRuntimeChannels[] = {
+    {kThrottleAdcChannel, kThrottleAdcReadIntervalMs, &lastThrottleAdcReadMs,
+     "throttle"},
+    {kBrakePressureAdcChannel, kBrakePressureAdcReadIntervalMs,
+     &lastBrakePressureAdcReadMs, "brake pressure"},
+    {kAfrAdcChannel, kAfrAdcReadIntervalMs, &lastAfrAdcReadMs, "AFR"},
+};
+constexpr uint8_t kAdcRuntimeChannelCount =
+    sizeof(adcRuntimeChannels) / sizeof(adcRuntimeChannels[0]);
+
+AdcSeqPhase adcSeqPhase = AdcSeqPhase::Idle;
+uint8_t adcSeqChannel = 0;
+uint32_t adcSeqConvStartedMs = 0;
+uint8_t adcSeqRotation = 0;
+
+void dispatchAdcResult(uint8_t channel, int16_t raw, float volts) {
+  switch (channel) {
+    case kThrottleAdcChannel:
+      updateThrottleAdcState(raw, volts, false);
+      break;
+    case kBrakePressureAdcChannel:
+      updateBrakePressureAdcState(raw, volts);
+      break;
+    case kAfrAdcChannel:
+      updateAfrAdcState(raw, volts);
+      break;
+    default:
+      break;
   }
-
-  lastThrottleAdcReadMs = now;
-
-  int16_t rawValue = 0;
-  float volts = 0.0F;
-  if (!readAds1115SingleEnded(kThrottleAdcChannel, rawValue, volts)) {
-    handleAdcReadFailure("throttle", kThrottleAdcChannel);
-    return;
-  }
-
-  updateThrottleAdcState(rawValue, volts, false);
+  updateAds1115ChannelState(channel, raw, volts);
 }
 
-void updateBrakePressureFromAdc(uint32_t now) {
-  if (adcI2cAddress == 0 ||
-      now - lastBrakePressureAdcReadMs < kBrakePressureAdcReadIntervalMs) {
+void serviceAds(uint32_t now) {
+  if (adcI2cAddress == 0) {
     return;
   }
 
-  lastBrakePressureAdcReadMs = now;
+  if (adcSeqPhase == AdcSeqPhase::Converting) {
+    if (now - adcSeqConvStartedMs < kAdcConversionWaitMs) {
+      return;
+    }
 
-  int16_t rawValue = 0;
-  float volts = 0.0F;
-  if (!readAds1115SingleEnded(kBrakePressureAdcChannel, rawValue, volts)) {
-    handleAdcReadFailure("brake pressure", kBrakePressureAdcChannel);
+    int16_t raw = 0;
+    if (!readAds1115Register(kAdcConversionRegister, raw)) {
+      adcSeqPhase = AdcSeqPhase::Idle;
+      const AdcRuntimeChannel &c = adcRuntimeChannels[adcSeqRotation];
+      handleAdcReadFailure(c.label, adcSeqChannel);
+      return;
+    }
+
+    const float volts = static_cast<float>(raw) * kAds1115VoltsPerBit;
+    dispatchAdcResult(adcSeqChannel, raw, volts);
+    adcSeqPhase = AdcSeqPhase::Idle;
     return;
   }
 
-  updateBrakePressureAdcState(rawValue, volts);
-}
+  for (uint8_t i = 0; i < kAdcRuntimeChannelCount; ++i) {
+    const uint8_t idx = (adcSeqRotation + i) % kAdcRuntimeChannelCount;
+    AdcRuntimeChannel &c = adcRuntimeChannels[idx];
+    if (now - *c.lastStartMs < c.intervalMs) {
+      continue;
+    }
 
-void updateAfrFromAdc(uint32_t now) {
-  if (adcI2cAddress == 0 || now - lastAfrAdcReadMs < kAfrAdcReadIntervalMs) {
+    if (!writeAds1115Register(kAdcConfigRegister, makeAds1115Config(c.channel))) {
+      adcSeqRotation = idx;
+      handleAdcReadFailure(c.label, c.channel);
+      return;
+    }
+
+    *c.lastStartMs = now;
+    adcSeqChannel = c.channel;
+    adcSeqRotation = idx;
+    adcSeqConvStartedMs = now;
+    adcSeqPhase = AdcSeqPhase::Converting;
     return;
   }
-
-  lastAfrAdcReadMs = now;
-
-  int16_t rawValue = 0;
-  float volts = 0.0F;
-  if (!readAds1115SingleEnded(kAfrAdcChannel, rawValue, volts)) {
-    handleAdcReadFailure("AFR", kAfrAdcChannel);
-    return;
-  }
-
-  updateAfrAdcState(rawValue, volts);
 }
 
 void updateBatteryFromAdc(uint32_t now) {
@@ -3195,9 +3238,7 @@ void setup() {
 void loop() {
   const uint32_t now = millis();
 
-  updateThrottleFromAdc(now);
-  updateBrakePressureFromAdc(now);
-  updateAfrFromAdc(now);
+  serviceAds(now);
   updateBatteryFromAdc(now);
   updateGpsFromSerial(now);
   updateLedIdleBlink(now);
