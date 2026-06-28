@@ -50,7 +50,7 @@ constexpr uint16_t kLedDisconnectedBlinkIntervalMs = 2000;
 constexpr float kLedThrottleThresholdPercent = 1.0F;
 constexpr uint8_t kAdcSdaPin = 22;
 constexpr uint8_t kAdcSclPin = 19;
-constexpr uint32_t kAdcI2cClockHz = 100000;
+constexpr uint32_t kAdcI2cClockHz = 50000;
 constexpr uint16_t kAdcI2cTimeoutMs = 25;
 constexpr uint16_t kAdcLogIntervalMs = 5000;
 constexpr uint16_t kAdcMissingLogIntervalMs = 5000;
@@ -1362,11 +1362,14 @@ void recoverI2cBus() {
 
   // Прокачиваем до 9 клоков, чтобы slave отпустил залипший SDA после
   // оборванной транзакции (характерно для Error 263 -> -1).
+  // Половина периода SCL для kAdcI2cClockHz: при 50 кГц это 10 мкс,
+  // чтобы slave успевал отпустить залипший SDA на сниженной частоте.
+  const uint32_t halfPeriodUs = 500000UL / kAdcI2cClockHz;
   for (int i = 0; i < 9; ++i) {
     digitalWrite(kAdcSclPin, LOW);
-    delayMicroseconds(5);
+    delayMicroseconds(halfPeriodUs);
     digitalWrite(kAdcSclPin, HIGH);
-    delayMicroseconds(5);
+    delayMicroseconds(halfPeriodUs);
     if (digitalRead(kAdcSdaPin)) {
       break;
     }

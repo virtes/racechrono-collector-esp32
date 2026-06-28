@@ -8,10 +8,10 @@
         {
             "name": "PlatformIO",
             "includePath": [
-                "/Users/virtes/projects/virtes/racechrono-collector-esp32/src",
+                "/Users/virtes/projects/virtes/race-exporter-esp32/src",
                 "/Users/virtes/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                 "/Users/virtes/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
-                "/Users/virtes/projects/virtes/racechrono-collector-esp32/.pio/libdeps/wemos-d1-mini32/NimBLE-Arduino/src",
+                "/Users/virtes/projects/virtes/race-exporter-esp32/.pio/libdeps/wemos-d1-mini32/NimBLE-Arduino/src",
                 "/Users/virtes/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/newlib/platform_include",
                 "/Users/virtes/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include",
                 "/Users/virtes/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include/esp_additions/freertos",
@@ -244,10 +244,10 @@
             "browse": {
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
-                    "/Users/virtes/projects/virtes/racechrono-collector-esp32/src",
+                    "/Users/virtes/projects/virtes/race-exporter-esp32/src",
                     "/Users/virtes/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                     "/Users/virtes/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
-                    "/Users/virtes/projects/virtes/racechrono-collector-esp32/.pio/libdeps/wemos-d1-mini32/NimBLE-Arduino/src",
+                    "/Users/virtes/projects/virtes/race-exporter-esp32/.pio/libdeps/wemos-d1-mini32/NimBLE-Arduino/src",
                     "/Users/virtes/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/newlib/platform_include",
                     "/Users/virtes/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include",
                     "/Users/virtes/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include/esp_additions/freertos",
